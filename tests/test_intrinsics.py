@@ -94,8 +94,8 @@ class TestFrontCenter(unittest.TestCase):
         cfg = default_config()
         img = np.zeros((684, 518, 3), np.uint8)
         for mode in ("split", "letterbox"):
-            with self.assertRaises(NotImplementedError):
-                front_center_view(img, K_FC, mode, cfg)
+            with self.assertRaises(ValueError):
+                front_center_view(img, K_FC, mode, cfg)  # single-view helper: crop only
         with self.assertRaises(ValueError):
             front_center_view(img, K_FC, "nope", cfg)
 

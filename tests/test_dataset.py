@@ -25,9 +25,12 @@ def build_fake_root(root, with_zip=False):
     cfg = default_config()
     init_root_config(root, cfg)
     os.makedirs(os.path.join(root, "ego_masks"))
-    m = np.zeros((684, 518), np.uint8)
-    m[600:] = 255
-    cv2.imwrite(os.path.join(root, "ego_masks", "ring_front_center.png"), m)
+    for cam in CAMS:
+        w, h = stored_size(cam, cfg)
+        m = np.zeros((h, w), np.uint8)
+        if cam == FRONT_CENTER:
+            m[600:] = 255
+        cv2.imwrite(os.path.join(root, "ego_masks", f"{cam}.png"), m)
     log = os.path.join(root, "logs", "val", "fake")
     rng = np.random.default_rng(0)
     rows, mrows = [], []
@@ -135,9 +138,9 @@ class TestStage1Synthetic(unittest.TestCase):
             self.check_sample(s, 21)
             self.assertIn("depth_single", s)
             self.assertEqual(tuple(s["box_mask"].shape), (21, 392, 518))
-            for mode in ("split", "letterbox"):
-                with self.assertRaises(NotImplementedError):
-                    Stage1Dataset(root, "val", ["fake"], front_center_mode=mode)
+            for mode, n_img in (("split", 16), ("letterbox", 14)):
+                s = Stage1Dataset(root, "val", ["fake"], front_center_mode=mode)[0]
+                self.check_sample(s, n_img)
             with self.assertRaises(ValueError):
                 Stage1Dataset(root, "val", ["fake"], front_center_mode="other")
 

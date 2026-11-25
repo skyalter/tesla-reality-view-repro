@@ -196,6 +196,7 @@ def process_log(raw_root: str, split: str, log_id: str, out_root: str, cfg: dict
         "stored_size_wh": {c: list(stored_size(c, cfg)) for c in CAMS},
         "K_full": {c: ctx.calib[c].K.tolist() for c in CAMS},
         "K_stored": {c: ctx.K[c].tolist() for c in CAMS},
+        "ego_mask_px": {c: int(ctx.ego_masks[c].sum()) for c in CAMS},
         "pixel_centre_convention": "integer (pixel u covers [u-0.5, u+0.5)); add 0.5 to cx, cy for gsplat",
         "ego_T_cam": {c: ctx.calib[c].ego_T_cam.tolist() for c in CAMS},
         "ego_T_lidar": {k: ctx.ego_T_sensor[k].tolist() for k in ("up_lidar", "down_lidar") if k in ctx.ego_T_sensor},

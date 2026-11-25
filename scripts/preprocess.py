@@ -77,12 +77,18 @@ def main():
     commit = code_commit(REPO)
     with open(os.path.join(args.out_root, "CODE_COMMIT.txt"), "a") as f:
         f.write(f"{dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')} {commit}\n")
-    # dataset-level ego masks at the stored resolution
+    # dataset-level ego masks at the stored resolution, one per camera (all-zero where the car is not seen);
+    # the reader requires all seven. A root never mixes masks: existing ones must be identical.
     em_dir = os.path.join(args.out_root, "ego_masks")
     os.makedirs(em_dir, exist_ok=True)
     for cam, m in ego_masks_for_log(args.ego_mask_dir, CAMS, cfg).items():
-        if m.any():
-            cv2.imwrite(os.path.join(em_dir, f"{cam}.png"), m.astype("uint8") * 255)
+        f = os.path.join(em_dir, f"{cam}.png")
+        if os.path.isfile(f):
+            old = cv2.imread(f, cv2.IMREAD_GRAYSCALE)
+            if old is None or old.shape != m.shape or not ((old > 0) == m).all():
+                sys.exit(f"{f} differs from the mask made from --ego-mask-dir; use a new output root")
+        else:
+            cv2.imwrite(f, m.astype("uint8") * 255)
 
     logs = resolve_logs(args)
     pool = None
