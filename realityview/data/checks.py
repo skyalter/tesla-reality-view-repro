@@ -76,16 +76,23 @@ def check_timestamps(ctx, moments: pd.DataFrame) -> dict:
         d = np.diff(ctx.cam_ts[c]) / 1e6
         iv[c] = [float(d.min()), float(d.max())]
     iv_ok = all(FRAME_INTERVAL_MS[0] <= a and b <= FRAME_INTERVAL_MS[1] for a, b in iv.values())
-    comp = moments[moments["complete"]]
-    max_dt = float(comp["max_abs_dt_ms"].max()) if len(comp) else float("nan")
+    # ``complete`` is defined by the same tolerance, so the group check is on the moments away from the two
+    # ends of the log: there every camera must have its partner frame within MAX_GROUP_DT_MS. Only the first
+    # and last moment may lack a partner (the camera started late or stopped early).
+    n = len(moments)
+    interior = moments.iloc[1:n - 1] if n > 2 else moments.iloc[0:0]
+    max_dt_interior = float(interior["max_abs_dt_ms"].max()) if len(interior) else float("nan")
+    n_incomplete_interior = int((~interior["complete"]).sum())
     n_s1 = int(moments["valid_stage1"].sum())
     n_s2 = int(moments["valid_stage2"].sum())
-    ok = missing == 0 and iv_ok and max_dt <= MAX_GROUP_DT_MS and n_s2 >= MIN_STRICT_MOMENTS
-    return _res(ok, missing_poses=missing, frame_interval_ms=iv, max_group_dt_ms=max_dt,
-                n_moments=int(len(moments)), n_incomplete=int((~moments["complete"]).sum()),
-                n_valid_stage1=n_s1, n_valid_stage2=n_s2,
-                threshold=f"0 missing poses; intervals in {FRAME_INTERVAL_MS} ms; group dt <= {MAX_GROUP_DT_MS} ms; "
-                          f"valid_stage2 >= {MIN_STRICT_MOMENTS}")
+    ok = (missing == 0 and iv_ok and max_dt_interior <= MAX_GROUP_DT_MS and n_incomplete_interior == 0
+          and n_s2 >= MIN_STRICT_MOMENTS)
+    return _res(ok, missing_poses=missing, frame_interval_ms=iv, max_group_dt_ms_interior=max_dt_interior,
+                max_group_dt_ms_all=float(moments["max_abs_dt_ms"].max()) if n else float("nan"),
+                n_moments=int(n), n_incomplete=int((~moments["complete"]).sum()),
+                n_incomplete_interior=n_incomplete_interior, n_valid_stage1=n_s1, n_valid_stage2=n_s2,
+                threshold=f"0 missing poses; intervals in {FRAME_INTERVAL_MS} ms; group dt <= {MAX_GROUP_DT_MS} ms "
+                          f"for every moment except the first and last; valid_stage2 >= {MIN_STRICT_MOMENTS}")
 
 
 def _psnr(a, b):
