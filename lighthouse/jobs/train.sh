@@ -26,8 +26,13 @@ MAX_MINUTES="$(( RV_MINUTES > 30 ? RV_MINUTES - 20 : RV_MINUTES / 2 ))"
 export OMP_NUM_THREADS=4
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
 
+# The processes of one job meet on a local port; derive it from the job id so that two jobs on one node
+# do not pick the same one.
+PORT="$(( 20000 + ${SLURM_JOB_ID:-0} % 20000 ))"
+
 status=0
-python -m torch.distributed.run --nproc_per_node="$RV_GPUS" scripts/train.py --config "configs/$RV_CONFIG.yaml" \
+python -m torch.distributed.run --nproc_per_node="$RV_GPUS" --master_port "$PORT" \
+  scripts/train.py --config "configs/$RV_CONFIG.yaml" \
   --set run_dir="$RUN_DIR" data.root="$RV_PROCESSED" model.weights_root="$RV_WEIGHTS" \
         max_minutes="$MAX_MINUTES" sync_command="$SYNC" "$@" || status=1
 
