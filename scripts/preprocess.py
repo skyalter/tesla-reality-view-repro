@@ -8,7 +8,7 @@ Usage (from the repository root, nothing installed):
 Each log goes to <out-root>/logs/<split>/<log_id>/ and is finished when its DONE file exists; finished
 logs are skipped on a rerun (use --redo to force). Incomplete raw logs (e.g. training logs downloaded with
 poses and boxes only) are reported and skipped, and make the exit status non-zero.
-Sky scores are not produced by this version (they need the DA3METRIC model); sky/ is left empty.
+Sky scores are a second pass over the stored images (scripts/sky_scores.py, needs a GPU); sky/ is left empty here.
 A JSON report of the run is written to <out-root>/runs/.
 """
 from __future__ import annotations

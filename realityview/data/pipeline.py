@@ -205,7 +205,7 @@ def process_log(raw_root: str, split: str, log_id: str, out_root: str, cfg: dict
         "ego_T_cam": {c: ctx.calib[c].ego_T_cam.tolist() for c in CAMS},
         "ego_T_lidar": {k: ctx.ego_T_sensor[k].tolist() for k in ("up_lidar", "down_lidar") if k in ctx.ego_T_sensor},
         "config": cfg, "config_sha256": config_sha256(cfg), "code_commit": commit,
-        "sky": "not produced in this version (needs the DA3METRIC model); sky/ is reserved",
+        "sky": "second pass: scripts/sky_scores.py writes sky/<cam>/<ts>.png (raw DA3METRIC-LARGE score x 100) and sky/DONE",
         "software": {"python": platform.python_version(), "numpy": np.__version__, "pandas": pd.__version__,
                      "opencv": cv2.__version__},
     }
