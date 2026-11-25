@@ -168,24 +168,85 @@ def points_in_boxes(pts: np.ndarray, boxes: pd.DataFrame, margin_lw: float, marg
     return inside
 
 
-def _box_surface_samples(n: int) -> np.ndarray:
-    """Points on the surface of the unit cube [-1, 1]^3, n x n per face."""
-    g = np.linspace(-1.0, 1.0, n)
-    a, b = np.meshgrid(g, g, indexing="ij")
-    a, b = a.ravel(), b.ravel()
-    one = np.ones_like(a)
-    faces = [np.stack(x, 1) for x in (
-        (one, a, b), (-one, a, b), (a, one, b), (a, -one, b), (a, b, one), (a, b, -one))]
-    return np.concatenate(faces, 0)
+_UNIT_CORNERS = np.array([[sx, sy, sz] for sx in (-1.0, 1.0) for sy in (-1.0, 1.0) for sz in (-1.0, 1.0)])
+NEAR_PLANE_M = 0.05
+
+
+def _clip_to_near_plane(pc: np.ndarray, z_near: float = NEAR_PLANE_M) -> np.ndarray:
+    """Vertices of (convex hull of ``pc``) intersected with the half-space z >= z_near.
+
+    The vertices in front plus the crossing point of every segment between a vertex in front and one
+    behind; their convex hull is exactly the clipped body (every crossing lies in it, and every new vertex
+    is the crossing of some edge)."""
+    front = pc[:, 2] >= z_near
+    if front.all() or not front.any():
+        return pc[front]
+    a = pc[front][:, None, :]
+    b = pc[~front][None, :, :]
+    t = (z_near - a[..., 2]) / (b[..., 2] - a[..., 2])
+    cross = (a + t[..., None] * (b - a)).reshape(-1, 3)
+    return np.concatenate([pc[front], cross], 0)
+
+
+def _clip_polygon(poly: np.ndarray, x0: float, y0: float, x1: float, y1: float) -> np.ndarray:
+    """Sutherland-Hodgman clip of a convex polygon (M, 2) to the rectangle [x0, x1] x [y0, y1]."""
+    for axis, bound, keep_greater in ((0, x0, True), (0, x1, False), (1, y0, True), (1, y1, False)):
+        if len(poly) == 0:
+            break
+        out = []
+        n = len(poly)
+        for i in range(n):
+            p, q = poly[i], poly[(i + 1) % n]
+            p_in = p[axis] >= bound if keep_greater else p[axis] <= bound
+            q_in = q[axis] >= bound if keep_greater else q[axis] <= bound
+            if p_in:
+                out.append(p)
+            if p_in != q_in:
+                t = (bound - p[axis]) / (q[axis] - p[axis])
+                out.append(p + t * (q - p))
+        poly = np.array(out, np.float64).reshape(-1, 2)
+    return poly
+
+
+def project_box_polygon(corners_cam: np.ndarray, K: np.ndarray, wh) -> np.ndarray | None:
+    """Image polygon (M, 2), integer pixel-centre convention, covered by a convex body given by its
+    vertices in the camera frame; clipped at the near plane and to the image (+1 px). None if not visible."""
+    W, H = int(wh[0]), int(wh[1])
+    pc = _clip_to_near_plane(corners_cam)
+    if len(pc) < 3:
+        return None
+    u = (K[0, 0] * pc[:, 0] + K[0, 1] * pc[:, 1]) / pc[:, 2] + K[0, 2]
+    v = K[1, 1] * pc[:, 1] / pc[:, 2] + K[1, 2]
+    hull = cv2.convexHull(np.stack([u, v], 1).astype(np.float64).astype(np.float32))[:, 0, :].astype(np.float64)
+    poly = _clip_polygon(hull, -1.0, -1.0, W, H)
+    return poly if len(poly) >= 3 else None
+
+
+def box_corners_city(boxes: pd.DataFrame, cfg: dict) -> np.ndarray:
+    """(B, 16, 3) city-frame vertices of every grown box at both ends of its velocity sweep.
+
+    Length and width grow by ``margin_lw_per_side_m`` on each side, height by ``margin_h_per_side_m``; the
+    box is swept along its velocity by |v| * velocity_stretch_s in total, centred on the box."""
+    mc = cfg["masks"]
+    ctr = boxes[["cx", "cy", "cz"]].to_numpy(np.float64)
+    R = quat_to_rotmat(boxes[["cqw", "cqx", "cqy", "cqz"]].to_numpy(np.float64))
+    half = np.stack([boxes["length_m"].to_numpy(np.float64) / 2 + mc["margin_lw_per_side_m"],
+                     boxes["width_m"].to_numpy(np.float64) / 2 + mc["margin_lw_per_side_m"],
+                     boxes["height_m"].to_numpy(np.float64) / 2 + mc["margin_h_per_side_m"]], 1)
+    vel = np.nan_to_num(boxes[["vx", "vy", "vz"]].to_numpy(np.float64))
+    local = _UNIT_CORNERS[None] * half[:, None, :]  # (B, 8, 3)
+    world = np.einsum("bij,bkj->bki", R, local) + ctr[:, None, :]
+    shift = (vel * float(mc["velocity_stretch_s"]) / 2)[:, None, :]
+    return np.concatenate([world - shift, world + shift], 1)
 
 
 def draw_box_mask(boxes: pd.DataFrame, cam_T_city: np.ndarray, K: np.ndarray, wh, cfg: dict,
                   bits=None) -> np.ndarray:
     """uint8 mask at (H, W): bit 1 moving, bit 2 person-like, bit 4 any box.
 
-    Each box is grown (length/width/height + the per-side margins on every side), swept along its velocity by
-    |v| * velocity_stretch_s (centred), sampled on its six faces, projected (points behind the camera are
-    dropped), filled as a convex hull, then dilated. Boxes partly outside the image are still drawn.
+    Each box is grown (see ``box_corners_city``), the convex body is clipped at a near plane 5 cm in front
+    of the camera, projected, clipped to the image and filled (so boxes partly behind the camera or partly
+    outside the image are drawn exactly), then every bit is dilated by ``dilate_px``.
     ``bits`` optionally restricts which boxes are drawn, e.g. MASK_MOVING | MASK_PERSON.
     """
     mc = cfg["masks"]
@@ -193,36 +254,20 @@ def draw_box_mask(boxes: pd.DataFrame, cam_T_city: np.ndarray, K: np.ndarray, wh
     mask = np.zeros((H, W), np.uint8)
     if len(boxes) == 0:
         return mask
-    unit = _box_surface_samples(int(mc["face_samples"]))
-    stretch = float(mc["velocity_stretch_s"])
-    ctr = boxes[["cx", "cy", "cz"]].to_numpy(np.float64)
-    R = quat_to_rotmat(boxes[["cqw", "cqx", "cqy", "cqz"]].to_numpy(np.float64))
-    half = np.stack([boxes["length_m"].to_numpy() / 2 + mc["margin_lw_per_side_m"],
-                     boxes["width_m"].to_numpy() / 2 + mc["margin_lw_per_side_m"],
-                     boxes["height_m"].to_numpy() / 2 + mc["margin_h_per_side_m"]], 1)
-    vel = np.nan_to_num(boxes[["vx", "vy", "vz"]].to_numpy(np.float64))
+    corners = box_corners_city(boxes, cfg)
+    corners_cam = corners @ cam_T_city[:3, :3].T + cam_T_city[:3, 3]
     moving = boxes["moving"].to_numpy(bool)
     person = boxes["person_like"].to_numpy(bool)
-    lim = np.array([4 * W, 4 * H])
     for b in range(len(boxes)):
         val = MASK_ANY | (MASK_MOVING if moving[b] else 0) | (MASK_PERSON if person[b] else 0)
         if bits is not None and not (val & bits):
             continue
-        local = unit * half[b]
-        world = local @ R[b].T + ctr[b]
-        shift = vel[b] * stretch / 2
-        pts = np.concatenate([world - shift, world + shift], 0) if np.any(shift) else world
-        pc = pts @ cam_T_city[:3, :3].T + cam_T_city[:3, 3]
-        pc = pc[pc[:, 2] > 0.1]
-        if len(pc) < 3:
+        poly = project_box_polygon(corners_cam[b], K, (W, H))
+        if poly is None:
             continue
-        uv = np.stack([K[0, 0] * pc[:, 0] / pc[:, 2] + K[0, 2], K[1, 1] * pc[:, 1] / pc[:, 2] + K[1, 2]], 1)
-        if (uv[:, 0].max() < -0.5 or uv[:, 0].min() > W - 0.5 or uv[:, 1].max() < -0.5 or uv[:, 1].min() > H - 0.5):
-            continue
-        uv = np.clip(uv, -lim, lim + np.array([W, H]))
-        hull = cv2.convexHull(np.round(uv).astype(np.int32))
         layer = np.zeros((H, W), np.uint8)
-        cv2.fillConvexPoly(layer, hull, 1)
+        # 4 fractional bits; integer coordinates are pixel centres, as everywhere else
+        cv2.fillConvexPoly(layer, np.round(poly * 16).astype(np.int32), 1, lineType=cv2.LINE_8, shift=4)
         mask |= layer * np.uint8(val)
     d = int(mc["dilate_px"])
     if d > 0 and mask.any():

@@ -82,13 +82,12 @@ DEFAULT_CONFIG = {
     },
     "masks": {
         # applied when box masks are drawn at read time (not stored)
-        # same per-side margins as for the LiDAR; the box is also extended at both ends along its velocity
-        # by |v| * velocity_stretch_s
+        # same per-side margins as for the LiDAR; the box is also swept along its velocity by
+        # |v| * velocity_stretch_s in total (half of it at each end)
         "margin_lw_per_side_m": 0.3,
         "margin_h_per_side_m": 0.2,
         "velocity_stretch_s": 0.1,
         "dilate_px": 2,
-        "face_samples": 9,
     },
     "ego_mask": {
         "dilate_px": 1,
