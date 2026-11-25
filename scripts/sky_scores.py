@@ -28,6 +28,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from torch.utils.data import DataLoader, Dataset  # noqa: E402
 
+from realityview.data.pipeline import code_commit  # noqa: E402
 from realityview.data.splits import read_list  # noqa: E402
 from realityview.data.store import SKY_DONE, LogStore, img_relpath, sha256_file, sky_relpath  # noqa: E402
 from realityview.models.sky import SKY_UINT8_SCALE, SkyScorer, sky_score_to_uint8  # noqa: E402
@@ -114,7 +115,7 @@ def main() -> int:
 
     scorer = None
     info = {"model": "da3metric-large", "weights_sha256": None, "uint8_scale": SKY_UINT8_SCALE,
-            "code_version": os.environ.get("RV_CODE_VERSION", "")}
+            "code_version": code_commit(REPO)}
     failed = 0
     for n, log_id in enumerate(logs, 1):
         log_dir = os.path.join(split_dir, log_id)
