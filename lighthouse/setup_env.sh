@@ -18,8 +18,9 @@ set -euo pipefail
 
 . "$(dirname "$0")/common.sh"
 
-BUILD="${1:-}"
-case "$BUILD" in
+# Not named BUILD or HOST: activating an environment that holds conda's compilers overwrites those.
+TORCH_BUILD="${1:-}"
+case "$TORCH_BUILD" in
   cu130) CUDA_VERSION=13.0 ;;
   cu126) CUDA_VERSION=12.6 ;;
   *) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
@@ -39,9 +40,9 @@ fi
 conda activate "$RV_ENV"
 conda env config vars set PYTHONNOUSERSITE=1 >/dev/null
 
-echo "== PyTorch $TORCH_VERSION ($BUILD)"
+echo "== PyTorch $TORCH_VERSION ($TORCH_BUILD)"
 python -m pip install --no-cache-dir "torch==$TORCH_VERSION" "torchvision==$TORCHVISION_VERSION" \
-  --index-url "https://download.pytorch.org/whl/$BUILD"
+  --index-url "https://download.pytorch.org/whl/$TORCH_BUILD"
 echo "== other packages"
 python -m pip install --no-cache-dir -r "$LH_DIR/requirements.txt"
 
