@@ -9,6 +9,7 @@ recommended ones. A configuration file only has to name what it changes.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 
@@ -20,6 +21,7 @@ from ..engine.distributed import unwrap
 from ..losses import depth as D
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+STANDING_BELOW_M = 0.5      # largest ego displacement within +-1 s below this: the car is standing
 
 DEFAULTS = {
     "model": {
@@ -151,9 +153,18 @@ class Stage1BackboneTask:
                              front_center_mode=d["front_center_mode"], depth_layer=d["depth_layer"],
                              load_single_layer=evaluation, with_sky=d["sky"])
 
+    def train_logs(self) -> list:
+        return read_logs(self.d["train_logs"], self.d["train_first"])
+
+    def eval_logs(self) -> list:
+        return read_logs(self.d["eval_logs"], self.d["eval_first"]) if self.d["eval_logs"] else []
+
     def build_train_dataset(self):
         d = self.d
-        dataset = self._dataset(d["train_split"], read_logs(d["train_logs"], d["train_first"]), False)
+        train, evaluation = self.train_logs(), self.eval_logs()
+        if d["train_split"] != d["eval_split"] and set(train) & set(evaluation):
+            raise RuntimeError("the same log is in the training and the evaluation list")
+        dataset = self._dataset(d["train_split"], train, False)
         if dataset.skipped:
             raise RuntimeError(f"training logs that are not ready: {dataset.skipped}")
         return Retry(dataset, d["retries"])
@@ -162,10 +173,20 @@ class Stage1BackboneTask:
         d = self.d
         if not d["eval_logs"]:
             return None
-        dataset = self._dataset(d["eval_split"], read_logs(d["eval_logs"], d["eval_first"]), True)
+        dataset = self._dataset(d["eval_split"], self.eval_logs(), True)
         if dataset.skipped:
             raise RuntimeError(f"evaluation logs that are not ready: {dataset.skipped}")
         return Subset(dataset, fixed_moments(dataset, d["eval_per_log"]))
+
+    def checkpoint_extra(self) -> dict:
+        """Which logs a checkpoint was trained and evaluated on: counts and a checksum of the id lists."""
+        def digest(ids):
+            return hashlib.sha256("\n".join(ids).encode()).hexdigest()
+
+        train, evaluation = self.train_logs(), self.eval_logs()
+        return {"data_lists": {"train_split": self.d["train_split"], "train_logs": len(train),
+                               "train_sha256": digest(train), "eval_split": self.d["eval_split"],
+                               "eval_logs": len(evaluation), "eval_sha256": digest(evaluation)}}
 
     # ------------------------------------------------------------------ loss
     def _classes(self, batch):
@@ -232,7 +253,8 @@ class Stage1BackboneTask:
 
         Names: `single` is the single-sweep LiDAR layer (the cleaner one), `acc` the accumulated layer;
         `aligned` means the prediction of every sample was first scaled by the median of LiDAR / prediction;
-        `orig` is the frozen original network on the same inputs. Keys with a "/" are the breakdowns."""
+        `orig` is the frozen original network on the same inputs; `standing` / `moving` split the samples by
+        the ego displacement within +-1 s. Keys with a "/" are the breakdowns by distance and by camera."""
         from ..data.config import CAMS
         from ..engine.trainer import to_device
 
@@ -254,6 +276,10 @@ class Stage1BackboneTask:
             versions = [("", out["depth"])] + ([("orig_", out["ref_depth"])] if has_reference else [])
             for prefix, z in versions:
                 metrics.update(prefix + "single", z, batch["depth_single"], single, cam_id)
+                for b in range(z.shape[0]):     # the same error, split by whether the car is standing
+                    group = "standing" if float(batch["displacement_m"][b]) < STANDING_BELOW_M else "moving"
+                    metrics.update(f"{prefix}single_{group}", z[b:b + 1], batch["depth_single"][b:b + 1],
+                                   single[b:b + 1], cam_id[b:b + 1])
                 metrics.update(prefix + "acc", z, batch["depth"], acc, cam_id)
                 scale = D.median_scale(z, batch["depth_single"], single)
                 metrics.update(prefix + "single_aligned", z * scale[:, None, None, None], batch["depth_single"],
@@ -291,6 +317,8 @@ class Stage1BackboneTask:
                 mean = sums[prefix + "scale_log"] / n
                 result[prefix + "scale_median_like"] = math.exp(mean)        # geometric mean of the per-sample factors
                 result[prefix + "scale_log_std"] = math.sqrt(max(sums[prefix + "scale_log_sq"] / n - mean ** 2, 0.0))
+        if "loss_anchor" in result:      # how far the depth has moved from the original where there is no LiDAR
+            result["drift_from_original"] = result["loss_anchor"]
         result["kappa"] = float(model.log_kappa.exp())
         result["samples"] = float(counts.get("scale_log", 0))
         return result

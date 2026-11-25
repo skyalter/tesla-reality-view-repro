@@ -25,8 +25,10 @@ from realityview.engine.checkpoint import load_checkpoint  # noqa: E402
 from realityview.tasks import build_task  # noqa: E402
 
 ROWS = (("single", "LiDAR single sweep"), ("single_aligned", "  same, scale-aligned per sample"),
+        ("single_moving", "  car moving"), ("single_standing", "  car standing"),
         ("acc", "LiDAR accumulated"), ("orig_single", "original network, single sweep"),
-        ("orig_single_aligned", "  same, scale-aligned per sample"), ("orig_acc", "original network, accumulated"))
+        ("orig_single_aligned", "  same, scale-aligned per sample"), ("orig_single_moving", "  car moving"),
+        ("orig_single_standing", "  car standing"), ("orig_acc", "original network, accumulated"))
 
 
 def report(metrics: dict) -> str:

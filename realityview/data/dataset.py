@@ -17,6 +17,7 @@ returns, slot-major:
     depth       float32 (N, H, W) LiDAR depth of the chosen layer (metres along the optical axis), 0 = none
     depth_flag  uint8 (N, H, W) 1 centre sweep, 2 synchronised dynamic point, 4 suspected see-through
     ego_mask    bool (N, H, W) ego body (and, for "letterbox", the padded columns): never supervised
+    displacement_m  float32 () largest ego displacement within +-1 s of t (below 0.5 m the car is standing)
   optional:
     depth_single, depth_single_flag   the single-sweep layer (``load_single_layer=True``)
     box_mask    uint8 (N, H, W) 1 moving, 2 person-like, 4 any box (``with_box_masks=True``)
@@ -259,6 +260,7 @@ class Stage1Dataset(Dataset):
             "depth": torch.from_numpy(depth),
             "depth_flag": torch.from_numpy(dflag),
             "ego_mask": torch.from_numpy(ego),
+            "displacement_m": torch.tensor(float(ref_row["disp_win_max_m"]), dtype=torch.float32),
             "log_id": log_id,
             "moment": i,
         }

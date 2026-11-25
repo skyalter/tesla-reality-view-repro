@@ -59,7 +59,7 @@ def build_fake_root(root, with_zip=False):
             for layer in ("acc", "single"):
                 write_bytes(os.path.join(log, depth_relpath(layer, cam, ts)), depth_to_bytes(d))
     for f in range(N_FRAMES):
-        r = {"i": f, "complete": f != 3}
+        r = {"i": f, "complete": f != 3, "disp_win_max_m": 0.4 * min(20, N_FRAMES - 1)}
         for c_i, cam in enumerate(CAMS):
             r[f"idx_{cam}"] = f
             r[f"ts_{cam}"] = T0 + f * 50_000_000 + c_i * 1_000_000

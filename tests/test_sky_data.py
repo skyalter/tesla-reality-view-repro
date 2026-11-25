@@ -154,6 +154,19 @@ class TestTaskHelpers(unittest.TestCase):
             self.assertEqual(read_logs(["x", "y"]), ["x", "y"])
             self.assertEqual(len(read_logs("data_lists/av2_train_stage1.txt")), 150)
 
+    def test_checkpoints_record_which_logs_were_used(self):
+        from realityview.tasks.stage1_backbone import Stage1BackboneTask
+
+        task = Stage1BackboneTask({"model": {"weights_root": "unused"},
+                                   "data": {"root": "unused", "train_first": 3, "eval_first": 2}})
+        lists = task.checkpoint_extra()["data_lists"]
+        self.assertEqual((lists["train_logs"], lists["eval_logs"]), (3, 2))
+        self.assertEqual(len(lists["train_sha256"]), 64)
+        other = Stage1BackboneTask({"model": {"weights_root": "unused"},
+                                    "data": {"root": "unused", "train_first": 4, "eval_first": 2}})
+        self.assertNotEqual(other.checkpoint_extra()["data_lists"]["train_sha256"], lists["train_sha256"])
+        self.assertEqual(other.checkpoint_extra()["data_lists"]["eval_sha256"], lists["eval_sha256"])
+
     def test_losses_on_a_reader_sample(self):
         from realityview.tasks.stage1_backbone import Stage1BackboneTask
 
@@ -162,6 +175,7 @@ class TestTaskHelpers(unittest.TestCase):
             write_sky(root)
             ds = Stage1Dataset(root, "val", ["fake"], with_sky=True, require_checks=False)
             batch = torch.utils.data.default_collate([ds[0]])
+            self.assertAlmostEqual(float(batch["displacement_m"][0]), 8.0, places=5)
             task = Stage1BackboneTask({"model": {"weights_root": "unused"}, "data": {"root": root},
                                        "loss": {"anchor": {"min_points": 50}}})
             log_z = torch.full(batch["depth"].shape, float(np.log(20.0)), requires_grad=True)

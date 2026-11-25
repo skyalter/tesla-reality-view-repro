@@ -15,6 +15,7 @@ The loop knows nothing about the model. Everything specific comes from a task ob
         checkpoint_skip = ()                                               # optional: state-dict name prefixes that
                                                                            # are not saved (rebuilt by build_model)
         def on_device(self, device): ...                                   # optional, called once after build_model
+        def checkpoint_extra(self) -> dict                                 # optional: more entries for checkpoints
 
 Three things make an interrupted run continue exactly where an uninterrupted one would be:
   * which samples a step sees is a pure function of (seed, step, rank, number of ranks);
@@ -239,6 +240,8 @@ class Trainer:
         if not self.info.is_main:
             return
         extra = {"world_size": self.info.world_size, "batch_size": self.cfg["batch_size"], "seed": self.cfg["seed"]}
+        if hasattr(self.task, "checkpoint_extra"):
+            extra.update(self.task.checkpoint_extra())
         save_checkpoint(self.run_dir / "last.pt", self.model, self.optimizer, self.step, self.cfg, extra,
                         self.skip_prefixes)
         keep = self.cfg["keep_every"]
