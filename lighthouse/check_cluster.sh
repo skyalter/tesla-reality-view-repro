@@ -77,15 +77,19 @@ fi
 
 section "existing Argoverse 2 Sensor data"
 # A Sensor log looks like <root>/<split>/<log_id>/sensors/cameras/...; the motion-forecasting dataset does not.
+declare -A REPORTED=()
 probe() {
   local base split first n found=1
   for base in "$1" "$1/sensor"; do
     for split in train val test; do
       [ -d "$base/$split" ] || continue
+      # The same directory can be reached from more than one candidate; report it once.
+      [ -z "${REPORTED[$base/$split]+x}" ] || { found=0; continue; }
       first="$(ls -U "$base/$split" 2>/dev/null | head -n 1)"
       if [ -n "$first" ] && [ -d "$base/$split/$first/sensors/cameras" ]; then
         n="$(ls -U "$base/$split" | wc -l)"
-        echo "  FOUND Sensor data: $base/$split ($n logs; ring cameras: $(ls -d "$base/$split/$first"/sensors/cameras/ring_* 2>/dev/null | wc -l), lidar dir: $([ -d "$base/$split/$first/sensors/lidar" ] && echo yes || echo no))"
+        echo "  FOUND Sensor data: $base/$split ($n logs; ring cameras: $(ls -d "$base/$split/$first"/sensors/cameras/ring_* 2>/dev/null | wc -l), lidar dir: $([ -d "$base/$split/$first/sensors/lidar" ] && echo yes || echo no); a download in progress shows up here too)"
+        REPORTED[$base/$split]=1
         found=0
       fi
     done
