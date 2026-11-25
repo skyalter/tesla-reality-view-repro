@@ -25,7 +25,7 @@ AV2_RAW_ROOT=... RV_PROCESSED_ROOT=... python -m unittest discover -s tests
 
 | Step | Module | Rule |
 |---|---|---|
-| Moments | `index.py` | A moment is a front-center frame i; each other camera takes its nearest frame (they expose up to ~22.5 ms apart). t − 0.5 s = frame i − 10. `valid_stage1`: i ≥ 10 and the moments i and i − 10 complete (all cameras within 30 ms). `valid_stage2`: also 20 ≤ i ≤ n − 21. Also stored: ego displacement t vs t − 0.5 s, max displacement within ±1 s. |
+| Moments | `index.py` | A moment is a front-center frame i; each other camera takes its nearest frame (they expose up to ~22.5 ms apart). t − 0.5 s = frame i − 10. `valid_stage1`: i ≥ 10 and the moments i and i − 10 complete (all cameras within 25 ms; the design said 30 ms, which lets the first or last moment of a log pair a camera with a frame 27.5 ms away from the neighbouring period). `valid_stage2`: also 20 ≤ i ≤ n − 21. Also stored: ego displacement t vs t − 0.5 s, max displacement within ±1 s. |
 | Poses | `av2_io.py` | Exact lookup by timestamp for every image, sweep and box, float64. The reference frame is chosen at read time. |
 | Images | `images.py` | Full decode, `INTER_AREA`, JPEG q95. Landscape cameras 2048×1550 → 518×392; front-center 1550×2048 → 518×684 whole, cut at read time. |
 | Intrinsics | `images.py` | Integer pixel-centre convention: `fx' = fx·sx`, `cx' = (cx + 0.5)·sx − 0.5` (same for y). Front-center crop: rows 146..538, `cy −= 146`. A renderer with centres at j + 0.5 (gsplat) needs `intrinsics_for_half_pixel_renderer` (cx, cy + 0.5). |

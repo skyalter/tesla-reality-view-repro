@@ -25,10 +25,10 @@ MIN_SWEEPS = 155
 FRAME_INTERVAL_MS = (49.0, 51.0)
 MAX_GROUP_DT_MS = 25.0
 MIN_STRICT_MOMENTS = 270
-# The design asked for > 40 dB, but JPEG quality 95 alone costs ~37.5-40 dB on these images (median 39.5 dB
-# on the first log), so 40 dB fails on correct output. 35 dB still catches wrong crops, colour swaps or
-# misaligned resizes, which fall far below 30 dB.
-IMG_PSNR_DB = 35.0
+# The design asked for PSNR > 40 dB against a direct resize, but JPEG quality 95 alone gives 34-40 dB on these
+# images (busy foliage is lowest), so 40 dB fails on correct output. The strict test is instead that
+# re-encoding the direct resize gives the stored bytes exactly; PSNR > 30 dB is kept as a loose sanity bound.
+IMG_PSNR_DB = 30.0
 INTRINSICS_TOL_PX = 0.01
 LIDAR_NN_MEDIAN_M = 0.15
 COVERAGE_SINGLE = (0.04, 0.10)
@@ -105,15 +105,21 @@ def check_image_cache(ctx, store: LogStore, frames: pd.DataFrame, cfg: dict, n_p
     rng = np.random.default_rng(seed)
     pick = rng.choice(len(frames), size=min(n_psnr, len(frames)), replace=False)
     ps = []
+    same_bytes = 0
     for i in sorted(pick):
         r = frames.iloc[i]
         ref = resize_array(cv2.imread(ctx.cam_files[r.cam][int(r.frame)]), r.cam, cfg)
-        im = cv2.imdecode(np.frombuffer(store.read(img_relpath(r.cam, r.timestamp_ns)), np.uint8), cv2.IMREAD_COLOR)
+        stored = store.read(img_relpath(r.cam, r.timestamp_ns))
+        re_enc = cv2.imencode(".jpg", ref, [cv2.IMWRITE_JPEG_QUALITY, int(cfg["images"]["jpeg_quality"])])[1].tobytes()
+        same_bytes += int(re_enc == stored)
+        im = cv2.imdecode(np.frombuffer(stored, np.uint8), cv2.IMREAD_COLOR)
         ps.append(_psnr(ref, im))
-    ok = count_ok and not bad and min(ps) > IMG_PSNR_DB
+    ok = count_ok and not bad and same_bytes == len(ps) and min(ps) > IMG_PSNR_DB
     return _res(ok, counts_match=count_ok, undecodable_or_wrong_size=bad[:10], n_bad=len(bad),
+                reencoded_identical=f"{same_bytes}/{len(ps)}",
                 psnr_db_min=float(min(ps)), psnr_db_median=float(np.median(ps)),
-                threshold=f"all decode at stored size; PSNR vs direct resize > {IMG_PSNR_DB} dB on {len(ps)} images")
+                threshold=f"all decode at stored size; on {len(ps)} random images the direct resize re-encodes to "
+                          f"the stored bytes and PSNR (JPEG loss only) > {IMG_PSNR_DB} dB")
 
 
 def intrinsics_error_px(K_full, full_wh, K_stored, stored_wh, crop_row0: int = 0, n: int = 1000, seed: int = 0) -> float:

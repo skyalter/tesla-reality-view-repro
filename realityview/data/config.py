@@ -52,7 +52,10 @@ DEFAULT_CONFIG = {
     },
     "index": {
         "past_offset_frames": 10,  # t - 0.5 s at 20 Hz
-        "group_tol_ms": 30.0,  # a moment is complete if every camera has a frame within this of t
+        # a moment is complete if every camera has a frame within this of t. The cameras sit at fixed offsets
+        # of up to 22.5 ms; at the first/last frame of a log a camera can lack its partner and the nearest
+        # frame is then 27.5 ms away (the neighbouring period). 25 ms (the ambiguity boundary) rejects that.
+        "group_tol_ms": 25.0,
         "stage2_margin_frames": 20,  # valid_stage2 needs 20 <= i <= n - 21
         "disp_window_frames": 20,  # +-1 s window for the maximum ego displacement
     },
