@@ -11,6 +11,8 @@ The loop knows nothing about the model. Everything specific comes from a task ob
         def training_step(self, model, batch, step) -> (loss, {name: float})
         def evaluate(self, model, loader, device) -> {name: float}
         collate = None                                                     # optional collate function
+        checkpoint_skip = ()                                               # optional: state-dict name prefixes that
+                                                                           # are not saved (rebuilt by build_model)
         def on_device(self, device): ...                                   # optional, called once after build_model
 
 Three things make an interrupted run continue exactly where an uninterrupted one would be:
@@ -157,9 +159,10 @@ class Trainer:
             betas=tuple(opt["betas"]))
         self.step = 0
 
+        self.skip_prefixes = tuple(getattr(task, "checkpoint_skip", ()))
         resume = find_resume(cfg["resume"], self.run_dir)
         if resume is not None:
-            state = load_checkpoint(resume, self.model, self.optimizer)
+            state = load_checkpoint(resume, self.model, self.optimizer, self.skip_prefixes)
             self.step = state["step"]
             self.log(f"resumed from {resume} at step {self.step}")
             for key, now in (("world_size", self.info.world_size), ("batch_size", cfg["batch_size"]), ("seed", cfg["seed"])):
@@ -223,11 +226,12 @@ class Trainer:
         if not self.info.is_main:
             return
         extra = {"world_size": self.info.world_size, "batch_size": self.cfg["batch_size"], "seed": self.cfg["seed"]}
-        save_checkpoint(self.run_dir / "last.pt", self.model, self.optimizer, self.step, self.cfg, extra)
+        save_checkpoint(self.run_dir / "last.pt", self.model, self.optimizer, self.step, self.cfg, extra,
+                        self.skip_prefixes)
         keep = self.cfg["keep_every"]
         if keep and self.step % keep == 0:
             save_checkpoint(self.run_dir / f"step_{self.step:08d}.pt", self.model, self.optimizer, self.step,
-                            self.cfg, extra)
+                            self.cfg, extra, self.skip_prefixes)
         self.sync()
 
     def sync(self, wait: bool = False) -> None:

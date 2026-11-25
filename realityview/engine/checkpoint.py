@@ -19,21 +19,30 @@ def code_version() -> str:
 
 
 def save_checkpoint(path, model: torch.nn.Module, optimizer: torch.optim.Optimizer, step: int, cfg: dict,
-                    extra: dict | None = None) -> None:
-    """Parameters that never train (requires_grad False) and buffers are saved too: a checkpoint loads on its
-    own, without the pretrained weights it started from."""
+                    extra: dict | None = None, skip_prefixes=()) -> None:
+    """Parameters that never train (requires_grad False) and buffers are saved too, so a checkpoint loads on
+    its own. Entries whose name starts with one of `skip_prefixes` are left out: use it for parts the model
+    rebuilds identically when it is constructed, such as a frozen copy of the pretrained network."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": step, "cfg": cfg,
+    skip = tuple(skip_prefixes)
+    weights = {k: v for k, v in model.state_dict().items() if not (skip and k.startswith(skip))}
+    state = {"model": weights, "optimizer": optimizer.state_dict(), "step": step, "cfg": cfg,
              "code_version": code_version(), **(extra or {})}
     torch.save(state, tmp)
     os.replace(tmp, path)       # a crash while writing never leaves a half-written file under the final name
 
 
-def load_checkpoint(path, model: torch.nn.Module, optimizer: torch.optim.Optimizer | None = None) -> dict:
+def load_checkpoint(path, model: torch.nn.Module, optimizer: torch.optim.Optimizer | None = None,
+                    skip_prefixes=()) -> dict:
+    """Load a checkpoint written by `save_checkpoint`. Everything except the skipped entries must match."""
     state = torch.load(path, map_location="cpu", weights_only=False)
-    model.load_state_dict(state["model"])
+    skip = tuple(skip_prefixes)
+    missing, unexpected = model.load_state_dict(state["model"], strict=False)
+    missing = [k for k in missing if not (skip and k.startswith(skip))]
+    if missing or unexpected:
+        raise RuntimeError(f"{path} does not fit the model: missing {missing[:5]}, unexpected {list(unexpected)[:5]}")
     if optimizer is not None:
         optimizer.load_state_dict(state["optimizer"])
     return state

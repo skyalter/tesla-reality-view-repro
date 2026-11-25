@@ -73,21 +73,21 @@ class LossTest(unittest.TestCase):
         lidar[0, 0, 3, 3] = 10.0
         lidar[0, 1, 5, 7] = 40.0
         mask = D.pixel_classes(lidar, flag, ego)["lidar"]
-        pred = torch.full_like(lidar, 20.0, requires_grad=True)
+        pred = torch.full_like(lidar, math.log(20.0), requires_grad=True)
         loss = D.lidar_depth_loss(pred, lidar, mask)
         self.assertAlmostEqual(float(loss.detach()), math.log(2.0), places=6)
         loss.backward()
         self.assertTrue(torch.isfinite(pred.grad).all())
         self.assertEqual(int((pred.grad != 0).sum()), 2)
-        self.assertAlmostEqual(float(D.lidar_depth_loss(lidar.clamp(min=1.0), lidar, mask)), 0.0, places=6)
+        self.assertAlmostEqual(float(D.lidar_depth_loss(lidar.clamp(min=1.0).log(), lidar, mask)), 0.0, places=6)
 
     def test_samples_count_equally_and_empty_ones_are_skipped(self):
         lidar, flag, ego, _ = maps(b=3)
         lidar[0, 0, 0, :8] = 10.0                      # 8 points, prediction twice too far
         lidar[1, 0, 0, 0] = 10.0                       # 1 point, prediction exact
         mask = D.pixel_classes(lidar, flag, ego)["lidar"]
-        pred = torch.full_like(lidar, 10.0)
-        pred[0] = 20.0
+        pred = torch.full_like(lidar, math.log(10.0))
+        pred[0] = math.log(20.0)
         self.assertAlmostEqual(float(D.lidar_depth_loss(pred, lidar, mask)), math.log(2.0) / 2, places=6)
         nothing = torch.zeros_like(mask)
         empty = D.lidar_depth_loss(pred.requires_grad_(), lidar, nothing)
@@ -98,7 +98,7 @@ class LossTest(unittest.TestCase):
         lidar, flag, ego, _ = maps()
         lidar[0, 0, 3, 3] = 10.0
         mask = D.pixel_classes(lidar, flag, ego)["lidar"]
-        pred = torch.full_like(lidar, 20.0)
+        pred = torch.full_like(lidar, math.log(20.0))
         conf = torch.full_like(lidar, 3.0)
         expected = 3.0 * math.log(2.0) - 0.2 * math.log(3.0)
         self.assertAlmostEqual(float(D.lidar_depth_loss(pred, lidar, mask, conf, 0.2)), expected, places=6)
@@ -115,9 +115,9 @@ class LossTest(unittest.TestCase):
         norms = D.ray_norms(K, 12, 16)
         mask = torch.zeros(1, 2, 12, 16, dtype=torch.bool)
         mask[0, 0, 0] = True
-        pred = 400.0 / norms
+        pred = torch.log(400.0 / norms)
         self.assertAlmostEqual(float(D.sky_distance_loss(pred, norms, mask, 400.0)), 0.0, places=5)
-        self.assertAlmostEqual(float(D.sky_distance_loss(pred / 4, norms, mask, 400.0)), math.log(4.0), places=5)
+        self.assertAlmostEqual(float(D.sky_distance_loss(pred - math.log(4.0), norms, mask, 400.0)), math.log(4.0), places=5)
 
     def test_reference_is_scaled_to_lidar_before_anchoring(self):
         g = torch.Generator().manual_seed(0)
@@ -128,12 +128,12 @@ class LossTest(unittest.TestCase):
         lidar[..., ::2, ::2] = truth[..., ::2, ::2]
         lidar_mask = lidar > 0
         lidar[0, 0, 0, 0] = 200.0                      # an outlier does not move the median
-        aligned, valid = D.align_reference(reference, lidar, lidar_mask, "sample", min_points=20, max_depth=80.0)
+        aligned, valid = D.align_reference(reference.log(), lidar, lidar_mask, "sample", min_points=20, max_depth=80.0)
         self.assertTrue(valid.all())
-        self.assertTrue(torch.allclose(aligned, truth, rtol=1e-4))
+        self.assertTrue(torch.allclose(aligned.exp(), truth, rtol=1e-4))
         anchor_mask = ~lidar_mask
-        self.assertAlmostEqual(float(D.anchor_loss(truth, aligned, anchor_mask & valid)), 0.0, places=5)
-        self.assertAlmostEqual(float(D.anchor_loss(truth * 1.5, aligned, anchor_mask & valid)), math.log(1.5), places=5)
+        self.assertAlmostEqual(float(D.anchor_loss(truth.log(), aligned, anchor_mask & valid)), 0.0, places=5)
+        self.assertAlmostEqual(float(D.anchor_loss((truth * 1.5).log(), aligned, anchor_mask & valid)), math.log(1.5), places=5)
 
     def test_per_view_alignment_and_views_without_enough_lidar(self):
         g = torch.Generator().manual_seed(1)
@@ -143,17 +143,17 @@ class LossTest(unittest.TestCase):
         lidar = torch.zeros_like(truth)
         lidar[:, :2, ::2, ::2] = truth[:, :2, ::2, ::2]
         lidar[0, 2, 0, :5] = truth[0, 2, 0, :5]        # only 5 points in the third view
-        aligned, valid = D.align_reference(reference, lidar, lidar > 0, "view", min_points=20)
-        self.assertTrue(torch.allclose(aligned[0, :2], truth[0, :2], rtol=1e-4))
+        aligned, valid = D.align_reference(reference.log(), lidar, lidar > 0, "view", min_points=20)
+        self.assertTrue(torch.allclose(aligned[0, :2].exp(), truth[0, :2], rtol=1e-4))
         self.assertTrue(valid[0, :2].all())
         self.assertFalse(valid[0, 2].any())
-        self.assertTrue(torch.equal(aligned[0, 2], reference[0, 2]))
-        same, ok = D.align_reference(reference, lidar, lidar > 0, "none")
-        self.assertTrue(torch.equal(same, reference) and ok.all())
+        self.assertTrue(torch.equal(aligned[0, 2], reference[0, 2].log()))
+        same, ok = D.align_reference(reference.log(), lidar, lidar > 0, "none")
+        self.assertTrue(torch.equal(same, reference.log()) and ok.all())
 
     def test_the_reference_gets_no_gradient(self):
-        pred = torch.full((1, 1, 4, 4), 10.0, requires_grad=True)
-        ref = torch.full((1, 1, 4, 4), 12.0, requires_grad=True)
+        pred = torch.full((1, 1, 4, 4), math.log(10.0), requires_grad=True)
+        ref = torch.full((1, 1, 4, 4), math.log(12.0), requires_grad=True)
         D.anchor_loss(pred, ref, torch.ones(1, 1, 4, 4, dtype=torch.bool)).backward()
         self.assertIsNone(ref.grad)
         self.assertTrue((pred.grad != 0).all())

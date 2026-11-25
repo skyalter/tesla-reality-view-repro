@@ -201,6 +201,30 @@ class TrainerTest(unittest.TestCase):
                 del os.environ[key]
         self.assert_same_weights("plain", "ddp")
 
+    def test_parts_the_model_rebuilds_can_be_left_out_of_checkpoints(self):
+        class SkipFirst(ToyTask):
+            checkpoint_skip = ("0.",)
+
+            def build_model(self):
+                model = super().build_model()
+                torch.nn.init.constant_(model[0].weight, 0.25)      # "pretrained" and never trained
+                model[0].requires_grad_(False)
+                return model
+
+            def param_groups(self, model):
+                return [{"name": "rest", "params": [p for m in list(model)[1:] for p in m.parameters()], "lr": self.lr}]
+
+        run(self.path("straight"), SkipFirst)
+        run(self.path("resumed"), SkipFirst, toy={"stop_file_at_step": 9})
+        saved = weights(self.path("resumed"))
+        self.assertEqual(saved["step"], 10)
+        self.assertFalse(any(key.startswith("0.") for key in saved["model"]))
+        run(self.path("resumed"), SkipFirst)
+        a, b = weights(self.path("straight")), weights(self.path("resumed"))
+        self.assertTrue(all(torch.equal(a["model"][k], b["model"][k]) for k in a["model"]))
+        with self.assertRaises(RuntimeError):                       # a checkpoint that lacks other parts is refused
+            run(self.path("resumed"), ToyTask)
+
     def test_the_sync_command_runs_after_checkpoints_and_at_the_end(self):
         marker = self.path("synced.txt")
         run(self.path("sync"), total_steps=10, checkpoint_every=4,

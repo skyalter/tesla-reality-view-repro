@@ -1,8 +1,9 @@
 """Depth losses and depth metrics for training the backbone (no rendering involved).
 
 All depths are z-depths: metres along the optical axis. Maps have shape (B, N, H, W): B samples of N views.
-Intrinsics use the integer pixel-centre convention of the processed data (pixel (u, v) has its centre at
-(u, v)).
+The losses take the predicted depth as its logarithm (`pred_log_z`), the form the network produces before any
+clamping; the metrics take plain depths. Intrinsics use the integer pixel-centre convention of the processed
+data (pixel (u, v) has its centre at (u, v)).
 
 Every pixel of an input view falls into at most one of three classes (`pixel_classes`):
   lidar    a LiDAR point is there                  -> its depth is compared with the LiDAR depth
@@ -70,46 +71,46 @@ def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (per_sample * has_any).sum() / has_any.sum().clamp(min=1)
 
 
-def log_depth_error(pred_z: torch.Tensor, target_z: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """|log pred - log target| where the mask is set, 0 elsewhere. Targets outside the mask may be anything."""
+def log_depth_error(pred_log_z: torch.Tensor, target_z: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """|pred_log_z - log target| where the mask is set, 0 elsewhere. Targets outside the mask may be anything."""
     safe = torch.where(mask, target_z, torch.ones_like(target_z)).clamp(min=1e-6)
-    return torch.where(mask, (torch.log(pred_z.clamp(min=1e-6)) - torch.log(safe)).abs(), torch.zeros_like(pred_z))
+    return torch.where(mask, (pred_log_z - torch.log(safe)).abs(), torch.zeros_like(pred_log_z))
 
 
-def lidar_depth_loss(pred_z, lidar_z, mask, conf=None, conf_lambda: float = 0.2) -> torch.Tensor:
+def lidar_depth_loss(pred_log_z, lidar_z, mask, conf=None, conf_lambda: float = 0.2) -> torch.Tensor:
     """Mean |log pred - log lidar| over LiDAR pixels. With a confidence map c >= 1 the per-pixel term becomes
     c * error - conf_lambda * log c, the form used by DUSt3R-style models."""
-    error = log_depth_error(pred_z, lidar_z, mask)
+    error = log_depth_error(pred_log_z, lidar_z, mask)
     if conf is not None:
         error = conf * error - conf_lambda * torch.log(conf)
     return masked_mean(error, mask)
 
 
-def sky_distance_loss(pred_z, ray_norm, mask, distance: float = 400.0) -> torch.Tensor:
-    """Mean |log(distance of the pixel) - log(distance)| over sky pixels."""
-    error = (torch.log((pred_z * ray_norm).clamp(min=1e-6)) - math.log(distance)).abs()
+def sky_distance_loss(pred_log_z, ray_norm, mask, distance: float = 400.0) -> torch.Tensor:
+    """Mean |log(distance of the pixel) - log(distance)| over sky pixels; distance = z * ray norm."""
+    error = (pred_log_z + torch.log(ray_norm) - math.log(distance)).abs()
     return masked_mean(error, mask)
 
 
-def align_reference(ref_z, lidar_z, lidar_mask, mode: str = "sample", min_points: int = 200,
+def align_reference(ref_log_z, lidar_z, lidar_mask, mode: str = "sample", min_points: int = 200,
                     max_depth: float = 80.0):
-    """Scale the reference depth so that it agrees with LiDAR: one factor per sample (all views together) or
-    per view, the median of lidar / reference over LiDAR pixels no farther than `max_depth`.
+    """Shift the reference log-depth so that it agrees with LiDAR: one scale factor per sample (all views
+    together) or per view, the median of lidar / reference over LiDAR pixels no farther than `max_depth`.
 
-    Returns (aligned reference, valid) where valid is a boolean map that is False for samples or views with
-    fewer than `min_points` LiDAR pixels; these have no trustworthy factor and are left unscaled.
-    mode "none" returns the reference unchanged."""
+    Returns (aligned reference log-depth, valid) where valid is a boolean map that is False for samples or
+    views with fewer than `min_points` such pixels; these have no trustworthy factor and are left as they
+    are. mode "none" returns the reference unchanged."""
     if mode == "none":
-        return ref_z, torch.ones_like(lidar_mask)
+        return ref_log_z, torch.ones_like(lidar_mask)
     if mode not in ("sample", "view"):
         raise ValueError(f"mode must be sample, view or none, got {mode}")
-    b, n = ref_z.shape[:2]
-    use = lidar_mask & (lidar_z <= max_depth) & (ref_z > 0)
-    ratio = torch.log(torch.where(use, lidar_z, torch.ones_like(lidar_z))) - torch.log(ref_z.clamp(min=1e-6))
+    b, n = ref_log_z.shape[:2]
+    use = lidar_mask & (lidar_z <= max_depth)
+    ratio = torch.log(torch.where(use, lidar_z, torch.ones_like(lidar_z)).clamp(min=1e-6)) - ref_log_z
     groups = 1 if mode == "sample" else n
     ratio, use = ratio.reshape(b, groups, -1), use.reshape(b, groups, -1)
-    shift = torch.zeros(b, groups, device=ref_z.device, dtype=ref_z.dtype)
-    ok = torch.zeros(b, groups, device=ref_z.device, dtype=torch.bool)
+    shift = torch.zeros(b, groups, device=ref_log_z.device, dtype=ref_log_z.dtype)
+    ok = torch.zeros(b, groups, device=ref_log_z.device, dtype=torch.bool)
     for i in range(b):
         for j in range(groups):
             values = ratio[i, j][use[i, j]]
@@ -117,13 +118,13 @@ def align_reference(ref_z, lidar_z, lidar_mask, mode: str = "sample", min_points
                 shift[i, j] = values.median()
                 ok[i, j] = True
     view_shape = (b, groups, 1, 1)
-    aligned = ref_z * torch.exp(shift).reshape(view_shape)
-    return aligned, ok.reshape(view_shape).expand_as(lidar_mask)
+    return ref_log_z + shift.reshape(view_shape), ok.reshape(view_shape).expand_as(lidar_mask)
 
 
-def anchor_loss(pred_z, aligned_ref_z, mask) -> torch.Tensor:
+def anchor_loss(pred_log_z, aligned_ref_log_z, mask) -> torch.Tensor:
     """Mean |log pred - log reference| over the anchor pixels. The reference carries no gradient."""
-    return masked_mean(log_depth_error(pred_z, aligned_ref_z.detach(), mask), mask)
+    error = torch.where(mask, (pred_log_z - aligned_ref_log_z.detach()).abs(), torch.zeros_like(pred_log_z))
+    return masked_mean(error, mask)
 
 
 def median_scale(pred_z, target_z, mask) -> torch.Tensor:
