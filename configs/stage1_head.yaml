@@ -1,0 +1,42 @@
+# Stage 1, second part: train the Gaussian head on the frozen backbone (rendering against photos).
+# The full run: 8 GPUs, one sample each.
+#
+#   torchrun --nproc_per_node=8 scripts/train.py --config configs/stage1_head.yaml \
+#       --set run_dir=<dir> data.root=<processed root> model.weights_root=<weights dir> \
+#             model.backbone_checkpoint=<last.pt of the backbone run>
+#
+# Values not listed here keep the defaults in realityview/tasks/stage1_head.py and
+# realityview/engine/trainer.py.
+task: stage1_head
+seed: 0
+total_steps: 15000
+batch_size: 1                 # per GPU
+num_workers: 4                # data-loading processes per GPU
+schedule: {warmup_steps: 500, min_lr: 1.0e-6}
+grad_clip: 1.0
+log_every: 20
+checkpoint_every: 500
+keep_every: 2500
+eval_every: 1000
+eval_at_start: true           # the first evaluation is the untrained head: one Gaussian per pixel, opacity 0.12
+
+model:
+  name: da3-large-1.1
+  weights_root: ${RV_WEIGHTS}
+  backbone_checkpoint: ${RV_BACKBONE_CHECKPOINT}   # last.pt of the stage1_backbone run
+  pose_scale: 20.0            # the value the backbone was trained with
+
+data:
+  root: ${RV_PROCESSED}
+  train_logs: data_lists/av2_train_stage1.txt
+  train_first: 150
+  eval_logs: data_lists/av2_val_dev10.txt
+  input_offsets: [0, -10]
+  front_center_mode: crop
+
+loss:
+  lidar: {weight: 1.0}
+  sky: {weight: 0.1}
+  photo: {weight: 1.0}
+  lpips: {weight: 0.05, ramp_steps: 1000}
+  render_depth: {weight: 0.5}
