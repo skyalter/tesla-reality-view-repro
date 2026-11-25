@@ -3,8 +3,9 @@
 An independent attempt to reproduce the **Reality View** of Tesla FSD v15 using public material only:
 public statements about the system, public datasets and open-source code. Not affiliated with Tesla.
 
-**Status: work in progress. Nothing is trained yet.** At this point the repository only holds the data
-download tooling and the cluster helper scripts. Models, training and evaluation code will follow.
+**Status: work in progress. Nothing is trained yet.** At this point the repository holds the data
+download tooling, the cluster helper scripts and the stage-1 data processing. Models, training and
+evaluation code will follow.
 
 ## What is being built
 
@@ -22,11 +23,16 @@ and above the car, in real time. The plan follows what has been said publicly ab
 ## Layout
 
 ```
-scripts/      command-line tools (data download so far)
+realityview/  Python package (data processing and the training reader so far)
+scripts/      command-line tools (download, preprocessing, data checks)
+tests/        unit tests (python -m unittest discover -s tests)
 lighthouse/   helper scripts for a Slurm cluster
 data_lists/   which Argoverse 2 logs are used for what
 assets/       small third-party files needed at run time (see NOTICE.md)
 ```
+
+The data processing (what it computes, output layout, commands) is described in
+[`realityview/data/README.md`](realityview/data/README.md).
 
 ## Data
 
