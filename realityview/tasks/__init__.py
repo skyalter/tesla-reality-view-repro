@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib
 
 TASKS = {
+    "stage1_backbone": "realityview.tasks.stage1_backbone:Stage1BackboneTask",
     "toy": "realityview.tasks.toy:ToyTask",
 }
 
