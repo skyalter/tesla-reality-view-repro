@@ -41,6 +41,25 @@ lighthouse/setup_env.sh cu130            # driver 580 or newer; use cu126 for dr
 lighthouse/test_env.sh h100 --gsplat     # one short GPU allocation: torch sees the GPU, gsplat compiles and renders
 ```
 
+## Jobs
+
+Everything after the download runs as a batch job. `submit.sh` snapshots the committed code, so a queued
+job is not changed by a later `git pull`, and writes each job's output to `~/Reality_View/logs/`.
+
+```bash
+lighthouse/check_nas.sh                  # once: can results be copied to long-term storage (RV_NAS)?
+lighthouse/submit.sh preprocess          # CPU: images, LiDAR depth, boxes, index
+lighthouse/submit.sh sky --after <id>    # 1 GPU: sky scores, data checks, overlay pictures
+lighthouse/submit.sh baseline            # 1 GPU: depth errors of the original network, several pose scales
+lighthouse/submit.sh train --gpus 1 --hours 1 --name smoke -- total_steps=100 stop_at_step=50   # try it; twice
+lighthouse/submit.sh train --hours 8     # 8 GPUs: train the backbone
+```
+
+A training job stops with a checkpoint 20 minutes before its time limit; submitting the same command
+again continues it. `touch $RV_SCRATCH/runs/<name>/STOP` stops it earlier without losing work.
+With `RV_NAS` set in `local.env`, checkpoints, numbers, logs and overlay pictures are copied there
+through rclone while the jobs run; processed data stays on scratch (it can be made again).
+
 ## Scripts
 
 | Script | What it does |
@@ -49,4 +68,7 @@ lighthouse/test_env.sh h100 --gsplat     # one short GPU allocation: torch sees 
 | `download_data.sh` | downloads raw data and weights for stage 1 |
 | `setup_env.sh` | creates the conda environment `realityview` from `requirements.txt` |
 | `test_env.sh` | checks the environment on a GPU node (runs `env_probe.py` through `srun`) |
+| `submit_test_env.sh` | the same check as a queued batch job |
+| `check_nas.sh` | checks that rclone can write to the place results are copied to |
+| `submit.sh` | submits a job: `preprocess`, `sky`, `baseline` or `train` (bodies in `jobs/`) |
 | `common.sh` | shared settings, sourced by the others |

@@ -3,9 +3,9 @@
 An independent attempt to reproduce the **Reality View** of Tesla FSD v15 using public material only:
 public statements about the system, public datasets and open-source code. Not affiliated with Tesla.
 
-**Status: work in progress. Nothing is trained yet.** At this point the repository holds the data
-download tooling, the cluster helper scripts and the stage-1 data processing. Models, training and
-evaluation code will follow.
+**Status: work in progress. Nothing is trained yet.** The repository holds what the first training step
+needs: data download and processing, the backbone and depth head, the depth losses, a multi-GPU training
+loop and the depth evaluation. The Gaussian head, rendering and the diffusion model will follow.
 
 ## What is being built
 
@@ -20,19 +20,52 @@ and above the car, in real time. The plan follows what has been said publicly ab
 3. **A pose-conditioned video diffusion model** that takes the encoder features and a camera pose and
    outputs the chase-view video directly. The first version uses one fixed chase camera.
 
+Stage 1 is trained in two parts. First the backbone alone, on depth: LiDAR depth, sky pushed far away,
+and, where there is no LiDAR, staying close to a frozen copy of the original network; no rendering. Then
+the backbone is frozen and the Gaussian head is trained with rendering losses. This repository currently
+covers the first part.
+
 ## Layout
 
 ```
-realityview/  Python package (data processing and the training reader so far)
-scripts/      command-line tools (download, preprocessing, data checks)
-tests/        unit tests (python -m unittest discover -s tests)
-lighthouse/   helper scripts for a Slurm cluster
+realityview/
+  data/       offline processing of Argoverse 2 logs and the training reader   (data/README.md)
+  models/     backbone, depth head, frozen reference, sky scorer; da3/ holds the Depth Anything 3 model files
+  losses/     depth losses and depth metrics
+  engine/     training loop: multi-GPU, exact resume, checkpoints, configuration
+  tasks/      what can be trained: the model, data and losses of one training run
+configs/      one YAML file per run; open design choices are switches in there
+scripts/      command-line tools: download, preprocess, sky scores, data checks, train, evaluate
+tests/        unit tests
+lighthouse/   scripts for a Slurm cluster                                       (lighthouse/README.md)
 data_lists/   which Argoverse 2 logs are used for what
 assets/       small third-party files needed at run time (see NOTICE.md)
 ```
 
-The data processing (what it computes, output layout, commands) is described in
-[`realityview/data/README.md`](realityview/data/README.md).
+## Running
+
+Nothing is installed; run from the repository root. The packages are listed in `lighthouse/requirements.txt`.
+
+```bash
+# process raw logs, add sky scores, check (see realityview/data/README.md)
+python scripts/preprocess.py --raw-root <raw> --out-root <processed>/av2_v1 --split train --logs data_lists/av2_train_stage1.txt --workers 8
+python scripts/sky_scores.py --out-root <processed>/av2_v1 --split train --weights <weights>/da3metric-large/model.safetensors
+python scripts/check_data.py --out-root <processed>/av2_v1 --split train --overlays --require-sky
+
+# depth errors of the original pretrained network (the baseline), then of a checkpoint
+python scripts/eval_depth.py --config configs/stage1_backbone.yaml --set data.root=<processed>/av2_v1 model.weights_root=<weights>
+python scripts/eval_depth.py --config configs/stage1_backbone.yaml --checkpoint <run>/last.pt --set ...
+
+# train the backbone: one process per GPU; the same command continues a run that was stopped
+torchrun --nproc_per_node=8 scripts/train.py --config configs/stage1_backbone.yaml \
+    --set run_dir=<run> data.root=<processed>/av2_v1 model.weights_root=<weights>
+
+# on one small GPU: the smaller backbone memorises two logs
+python scripts/train.py --config configs/stage1_overfit_base.yaml --set run_dir=<run> data.root=... model.weights_root=...
+```
+
+Tests use the standard library only: `python -m unittest discover -s tests`. Tests that need real data,
+pretrained weights or a GPU are skipped unless `AV2_RAW_ROOT`, `RV_PROCESSED_ROOT` and `RV_WEIGHTS_ROOT` are set.
 
 ## Data
 
