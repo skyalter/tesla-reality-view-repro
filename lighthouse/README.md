@@ -19,9 +19,11 @@ lighthouse/download_data.sh                              # fetch; run it inside 
 
 | Part | Size | Goes to |
 |---|---|---|
-| training logs, without stereo cameras | about 146 GB for 150 logs | `$RV_SCRATCH/raw/argoverse2_sensor/train/` |
-| validation logs: 20 for reporting (complete), 10 for tuning | about 33 GB | `$RV_SCRATCH/raw/argoverse2_sensor/val/` |
+| training logs, without stereo cameras | about 146 GB for 150 logs | `$RV_RAW/train/` |
+| validation logs: 20 for reporting (complete), 10 for tuning | about 33 GB | `$RV_RAW/val/` |
 | pretrained weights | 3.5 GB | `$RV_SCRATCH/weights/` |
+
+`RV_RAW` defaults to `$RV_SCRATCH/raw/argoverse2_sensor` and can be set in `local.env`.
 
 Every log is checked against the bucket listing and every weight file against a pinned SHA-256. The check
 tables are written next to the data as `*.download_check.tsv`; the script exits with an error while

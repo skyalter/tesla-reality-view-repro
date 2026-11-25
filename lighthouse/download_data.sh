@@ -10,14 +10,14 @@
 #   weights  pretrained weights, pinned to exact revisions and verified by SHA-256
 #
 # Where things go (RV_SCRATCH comes from lighthouse/local.env):
-#   $RV_SCRATCH/raw/argoverse2_sensor/<split>/<log_id>/...
-#   $RV_SCRATCH/weights/<name>/...
+#   raw logs:  $RV_SCRATCH/raw/argoverse2_sensor/<split>/<log_id>/...   (or $RV_RAW if it is set)
+#   weights:   $RV_SCRATCH/weights/<name>/...
 set -euo pipefail
 
 . "$(dirname "$0")/common.sh"
 rv_require_scratch
 
-ONLY="" WORKERS=16
+ONLY="" WORKERS=32
 EXTRA=()
 while [ $# -gt 0 ]; do
   case "$1" in

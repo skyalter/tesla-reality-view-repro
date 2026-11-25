@@ -8,7 +8,7 @@ Copied unchanged from [drivestudio](https://github.com/ziyc/drivestudio) (commit
 `data/ego_masks/argoverse/0.png`, `5.png` and `6.png`, renamed after the cameras they belong to.
 White pixels are the ego vehicle's body at the original image resolution.
 
-MIT License, Copyright (c) 2024 Ziyu Chen.
+MIT License, Copyright (c) 2024 Ziyu Chen. The full license text is in `assets/ego_masks/LICENSE.drivestudio`.
 
 ## Log lists for Argoverse 2
 

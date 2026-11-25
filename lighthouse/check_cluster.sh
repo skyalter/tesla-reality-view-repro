@@ -27,7 +27,7 @@ echo "kernel: $(uname -r)   bash: ${BASH_VERSION}"
 echo "python3: $(python3 --version 2>&1)   git: $(git --version 2>&1)"
 
 section "settings from lighthouse/local.env"
-for v in RV_SCRATCH RV_ACCOUNT RV_PARTITION RV_CONDA_SH; do
+for v in RV_SCRATCH RV_RAW RV_ACCOUNT RV_PARTITION RV_CONDA_SH; do
   echo "$v=${!v:-<not set>}"
 done
 
