@@ -160,21 +160,31 @@ class Stage1Dataset(Dataset):
     def _city_T_cam(self, L, cam, frame):
         return L["city_T_ego"][L["key"][(cam, frame)]] @ L["ego_T_cam"][cam]
 
-    def __getitem__(self, idx):
+    def _reference(self, li, i):
+        """(cam_T_ref, timestamp_ns) of the reference: the front-center camera at moment i, float64."""
+        L = self._log(li)
+        row = L["moments"].iloc[i]
+        frame = int(row[f"idx_{FRONT_CENTER}"])
+        return se3_inv(self._city_T_cam(L, FRONT_CENTER, frame)), int(row[f"ts_{FRONT_CENTER}"])
+
+    def _read_moment(self, li, j, cam_T_ref):
+        """Every view of moment j of log li, in ``self.layout`` order, as numpy arrays.
+
+        Keys: images (M, H, W, 3) RGB, K, ref_T_cam (float64, reference given by cam_T_ref), timestamp_ns,
+        cam_id, view, depth, depth_flag, ego_mask, and when switched on depth_single, depth_single_flag,
+        box_mask, sky (uint8, raw score x 100)."""
         from .boxes import draw_box_mask
 
-        li, i = self.samples[idx]
         log_id, store = self.logs[li]
         L = self._log(li)
-        mom = L["moments"]
+        row = L["moments"].iloc[j]
         W, H = (int(x) for x in self.cfg["images"]["landscape_wh"])
-        n = len(self.offsets) * len(self.layout)
+        n = len(self.layout)
         images = np.zeros((n, H, W, 3), np.uint8)
         Ks = np.zeros((n, 3, 3))
         city_T_cam = np.zeros((n, 4, 4))
         ts_all = np.zeros(n, np.int64)
         cam_id = np.zeros(n, np.int64)
-        slot = np.zeros(n, np.int64)
         view_id = np.zeros(n, np.int64)
         depth = np.zeros((n, H, W), np.float32)
         dflag = np.zeros((n, H, W), np.uint8)
@@ -187,88 +197,107 @@ class Stage1Dataset(Dataset):
             box_mask = np.zeros((n, H, W), np.uint8)
         if self.with_sky:
             sky = np.zeros((n, H, W), np.uint8)
-        # reference: front-center camera at t, whatever the inputs are
-        ref_row = mom.iloc[i]
-        ref_frame = int(ref_row[f"idx_{FRONT_CENTER}"])
-        t_ref = int(ref_row[f"ts_{FRONT_CENTER}"])
-        cam_T_ref = se3_inv(self._city_T_cam(L, FRONT_CENTER, ref_frame))
         k = 0
-        for s, o in enumerate(self.offsets):
-            row = mom.iloc[i + o]
-            for cam in CAMS:
-                frame = int(row[f"idx_{cam}"])
-                ts = int(row[f"ts_{cam}"])
-                im = cv2.imdecode(np.frombuffer(store.read(img_relpath(cam, ts)), np.uint8), cv2.IMREAD_COLOR)
-                if im is None:
-                    raise IOError(f"cannot decode {log_id}/{img_relpath(cam, ts)}")
-                hw = im.shape[:2]
-                K = L["K"][cam]
-                cTw = self._city_T_cam(L, cam, frame)  # city_T_cam
-                sparse = {name: store.depth(layer, cam, ts) for name, layer in layers}
-                bm = None
-                if self.with_box_masks:
-                    rows = L["box_rows"].get((cam, frame))
-                    bx = L["boxes"].iloc[rows] if rows is not None else L["boxes"].iloc[0:0]
-                    bm = draw_box_mask(bx, se3_inv(cTw), K, (hw[1], hw[0]), self.cfg)
-                sk = store.sky(cam, ts) if self.with_sky else None
-                if sk is not None and sk.shape != hw:
-                    raise ValueError(f"{log_id}: sky score of {cam} {ts} has shape {sk.shape}, image {hw}")
-                views = self.fc_views if cam == FRONT_CENTER else [None]
-                for v_i, view in enumerate(views):
-                    if view is None:
-                        images[k], Ks[k], ego[k] = im[:, :, ::-1], K, self.ego[cam]
-                        d = {name: sp.densify(hw) for name, sp in sparse.items()}
-                        if bm is not None:
-                            box_mask[k] = bm
-                        if sk is not None:
-                            sky[k] = sk
-                    else:
-                        images[k] = view.image(im)[:, :, ::-1]
-                        Ks[k] = view.K(K, hw[1])
-                        ego[k] = view.mask(self.ego[cam], pad_value=True)
-                        d = {}
-                        for name, sp in sparse.items():
-                            vu, z, f = view.sparse(sp.vu, sp.z, sp.flag, hw[1])
-                            dd = np.zeros((H, W), np.float32)
-                            ff = np.zeros((H, W), np.uint8)
-                            dd[vu[:, 0], vu[:, 1]] = z.astype(np.float32)
-                            ff[vu[:, 0], vu[:, 1]] = f
-                            d[name] = (dd, ff)
-                        if bm is not None:
-                            box_mask[k] = view.mask(bm)
-                        if sk is not None:
-                            sky[k] = view.image(sk)  # padded columns get 0 = not sky (they are ego-masked anyway)
-                    depth[k], dflag[k] = d["depth"]
-                    if self.load_single:
-                        depth_s[k], dflag_s[k] = d["single"]
-                    city_T_cam[k] = cTw
-                    ts_all[k] = ts
-                    cam_id[k] = CAMS.index(cam)
-                    slot[k] = s
-                    view_id[k] = v_i
-                    k += 1
-        ref_T_cam = cam_T_ref @ city_T_cam
-        out = {
-            "images": torch.from_numpy(np.ascontiguousarray(images.transpose(0, 3, 1, 2))),
-            "K": torch.from_numpy(Ks.astype(np.float32)),
-            "ref_T_cam": torch.from_numpy(ref_T_cam.astype(np.float32)),
-            "dt": torch.from_numpy(((ts_all - t_ref) / 1e9).astype(np.float32)),
-            "cam_id": torch.from_numpy(cam_id),
-            "slot": torch.from_numpy(slot),
-            "view": torch.from_numpy(view_id),
-            "timestamp_ns": torch.from_numpy(ts_all),
-            "depth": torch.from_numpy(depth),
-            "depth_flag": torch.from_numpy(dflag),
-            "ego_mask": torch.from_numpy(ego),
-            "displacement_m": torch.tensor(float(ref_row["disp_win_max_m"]), dtype=torch.float32),
-            "log_id": log_id,
-            "moment": i,
-        }
+        for cam in CAMS:
+            frame = int(row[f"idx_{cam}"])
+            ts = int(row[f"ts_{cam}"])
+            im = cv2.imdecode(np.frombuffer(store.read(img_relpath(cam, ts)), np.uint8), cv2.IMREAD_COLOR)
+            if im is None:
+                raise IOError(f"cannot decode {log_id}/{img_relpath(cam, ts)}")
+            hw = im.shape[:2]
+            K = L["K"][cam]
+            cTw = self._city_T_cam(L, cam, frame)  # city_T_cam
+            sparse = {name: store.depth(layer, cam, ts) for name, layer in layers}
+            bm = None
+            if self.with_box_masks:
+                rows = L["box_rows"].get((cam, frame))
+                bx = L["boxes"].iloc[rows] if rows is not None else L["boxes"].iloc[0:0]
+                bm = draw_box_mask(bx, se3_inv(cTw), K, (hw[1], hw[0]), self.cfg)
+            sk = store.sky(cam, ts) if self.with_sky else None
+            if sk is not None and sk.shape != hw:
+                raise ValueError(f"{log_id}: sky score of {cam} {ts} has shape {sk.shape}, image {hw}")
+            views = self.fc_views if cam == FRONT_CENTER else [None]
+            for v_i, view in enumerate(views):
+                if view is None:
+                    images[k], Ks[k], ego[k] = im[:, :, ::-1], K, self.ego[cam]
+                    d = {name: sp.densify(hw) for name, sp in sparse.items()}
+                    if bm is not None:
+                        box_mask[k] = bm
+                    if sk is not None:
+                        sky[k] = sk
+                else:
+                    images[k] = view.image(im)[:, :, ::-1]
+                    Ks[k] = view.K(K, hw[1])
+                    ego[k] = view.mask(self.ego[cam], pad_value=True)
+                    d = {}
+                    for name, sp in sparse.items():
+                        vu, z, f = view.sparse(sp.vu, sp.z, sp.flag, hw[1])
+                        dd = np.zeros((H, W), np.float32)
+                        ff = np.zeros((H, W), np.uint8)
+                        dd[vu[:, 0], vu[:, 1]] = z.astype(np.float32)
+                        ff[vu[:, 0], vu[:, 1]] = f
+                        d[name] = (dd, ff)
+                    if bm is not None:
+                        box_mask[k] = view.mask(bm)
+                    if sk is not None:
+                        sky[k] = view.image(sk)  # padded columns get 0 = not sky (they are ego-masked anyway)
+                depth[k], dflag[k] = d["depth"]
+                if self.load_single:
+                    depth_s[k], dflag_s[k] = d["single"]
+                city_T_cam[k] = cTw
+                ts_all[k] = ts
+                cam_id[k] = CAMS.index(cam)
+                view_id[k] = v_i
+                k += 1
+        out = {"images": images, "K": Ks, "ref_T_cam": cam_T_ref @ city_T_cam, "timestamp_ns": ts_all,
+               "cam_id": cam_id, "view": view_id, "depth": depth, "depth_flag": dflag, "ego_mask": ego}
         if self.load_single:
-            out["depth_single"] = torch.from_numpy(depth_s)
-            out["depth_single_flag"] = torch.from_numpy(dflag_s)
+            out["depth_single"], out["depth_single_flag"] = depth_s, dflag_s
         if self.with_box_masks:
-            out["box_mask"] = torch.from_numpy(box_mask)
+            out["box_mask"] = box_mask
         if self.with_sky:
-            out["sky"] = torch.from_numpy(sky.astype(np.float32) / SKY_UINT8_SCALE)
+            out["sky"] = sky
+        return out
+
+    @staticmethod
+    def _moment_tensors(m, t_ref, prefix=""):
+        """Torch output keys (with ``prefix``) from ``_read_moment`` arrays; dt relative to t_ref."""
+        out = {
+            "images": torch.from_numpy(np.ascontiguousarray(m["images"].transpose(0, 3, 1, 2))),
+            "K": torch.from_numpy(m["K"].astype(np.float32)),
+            "ref_T_cam": torch.from_numpy(m["ref_T_cam"].astype(np.float32)),
+            "dt": torch.from_numpy(((m["timestamp_ns"] - t_ref) / 1e9).astype(np.float32)),
+            "cam_id": torch.from_numpy(m["cam_id"]),
+            "view": torch.from_numpy(m["view"]),
+            "timestamp_ns": torch.from_numpy(m["timestamp_ns"]),
+            "depth": torch.from_numpy(m["depth"]),
+            "depth_flag": torch.from_numpy(m["depth_flag"]),
+            "ego_mask": torch.from_numpy(m["ego_mask"]),
+        }
+        for key in ("depth_single", "depth_single_flag", "box_mask"):
+            if key in m:
+                out[key] = torch.from_numpy(m[key])
+        if "sky" in m:
+            out["sky"] = torch.from_numpy(m["sky"].astype(np.float32) / SKY_UINT8_SCALE)
+        return {prefix + key: v for key, v in out.items()}
+
+    def __getitem__(self, idx):
+        li, i = self.samples[idx]
+        log_id, _ = self.logs[li]
+        cam_T_ref, t_ref = self._reference(li, i)
+        parts = [self._read_moment(li, i + o, cam_T_ref) for o in self.offsets]
+        m = {key: np.concatenate([p[key] for p in parts]) for key in parts[0]}
+        per = self._moment_tensors(m, t_ref)
+        slot = np.repeat(np.arange(len(self.offsets), dtype=np.int64), len(self.layout))
+        out = {key: per[key] for key in ("images", "K", "ref_T_cam", "dt", "cam_id")}
+        out["slot"] = torch.from_numpy(slot)
+        for key in ("view", "timestamp_ns", "depth", "depth_flag", "ego_mask"):
+            out[key] = per[key]
+        disp = float(self._log(li)["moments"].iloc[i]["disp_win_max_m"])
+        out["displacement_m"] = torch.tensor(disp, dtype=torch.float32)
+        out["log_id"] = log_id
+        out["moment"] = i
+        for key in ("depth_single", "depth_single_flag", "box_mask", "sky"):
+            if key in per:
+                out[key] = per[key]
         return out

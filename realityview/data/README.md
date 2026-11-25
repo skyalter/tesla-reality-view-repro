@@ -78,3 +78,33 @@ per process); otherwise the images of one log are shared out.
 Pixel convention: stored intrinsics put pixel centres at integer coordinates. A renderer with centres at
 j + 0.5 (gsplat) gets `images.intrinsics_for_half_pixel_renderer(K)` (cx, cy + 0.5); the LiDAR projection
 and the reader keep the integer convention.
+
+## Reader for the Gaussian head
+
+`head_dataset.py`: `Stage1HeadDataset` (a `Stage1Dataset`) adds one target moment t + k per sample, whose
+pictures the rendered Gaussians are compared with. Moments: `valid_stage2`, valid for `input_offsets`, and
+`disp_win_max_m >= min_displacement_m` (default 0.5 m; 0 keeps standing moments). Targets, in front-center
+frames:
+
+- `target_offsets="random"` (training): one sample per moment; k among the integers in
+  [−`max_target_frames`, `max_target_frames`] (default 20) that differ from every input offset by more than
+  `min_gap_frames` (default 3) and whose moment is complete (27 candidates with the defaults). The pick is
+  sha256(`"{seed}:{log_id}:{i}"`) modulo the number of candidates, so an index always gives the same sample.
+- `target_offsets=[k1, k2, ...]` (evaluation): one sample per (moment, k) with t + k complete; k = 0 or an
+  input offset repeats that input moment.
+
+`samples[idx]` stays (log index, moment); `sample_offsets[idx]` is k. A sample holds every key of
+`Stage1Dataset` (`box_mask` always, `sky` with `with_sky`, default on), plus:
+
+| Key | Type and shape | Meaning |
+|---|---|---|
+| `ref_T_ego` | float32 (4,4) | ego frame (rear axle, x forward, y left, z up) at the front-center timestamp of t → reference; the inverse of the front-center extrinsics |
+| `tgt_images`, `tgt_K`, `tgt_ref_T_cam`, `tgt_dt`, `tgt_cam_id`, `tgt_view`, `tgt_timestamp_ns` | as the inputs, first dimension M (7; 8 for "split") | the M views of t + k in `CAMS` order; same reference (front-center camera at t), `tgt_dt` relative to t |
+| `tgt_depth`, `tgt_depth_flag` | float32 / uint8 (M,392,518) | LiDAR depth of `depth_layer` |
+| `tgt_ego_mask` | bool (M,392,518) | ego body |
+| `tgt_box_mask` | uint8 (M,392,518) | boxes of the target moment: 1 moving, 2 person-like, 4 any box |
+| `tgt_sky` | float32 (M,392,518) | raw sky score (`with_sky`) |
+| `tgt_offset` | int64 () | k |
+
+Every target key equals what `Stage1Dataset` returns for the same moment read as an input (same
+`front_center_mode`, same reference).
