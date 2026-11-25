@@ -1,0 +1,22 @@
+# site-specific settings
+lighthouse/local.env
+
+# data, weights and outputs never go into git
+/data/
+/weights/
+/outputs/
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.download_check.tsv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Slurm logs
+*.log
+slurm-*.out
