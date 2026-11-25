@@ -33,6 +33,7 @@ import json
 import math
 import os
 import random
+import shutil
 import signal
 import subprocess
 import time
@@ -147,9 +148,8 @@ class Trainer:
         self.stop_requested = False
         self.started = time.time()
         self._sync_process = None
-        if cfg["deterministic"]:
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = bool(cfg["deterministic"])
+        torch.backends.cudnn.benchmark = False
         tf32 = bool(cfg["allow_tf32"]) and not cfg["deterministic"]
         torch.backends.cuda.matmul.allow_tf32 = tf32
         torch.backends.cudnn.allow_tf32 = tf32
@@ -242,12 +242,15 @@ class Trainer:
         extra = {"world_size": self.info.world_size, "batch_size": self.cfg["batch_size"], "seed": self.cfg["seed"]}
         if hasattr(self.task, "checkpoint_extra"):
             extra.update(self.task.checkpoint_extra())
-        save_checkpoint(self.run_dir / "last.pt", self.model, self.optimizer, self.step, self.cfg, extra,
-                        self.skip_prefixes)
+        last = self.run_dir / "last.pt"
+        save_checkpoint(last, self.model, self.optimizer, self.step, self.cfg, extra, self.skip_prefixes)
         keep = self.cfg["keep_every"]
-        if keep and self.step % keep == 0:
-            save_checkpoint(self.run_dir / f"step_{self.step:08d}.pt", self.model, self.optimizer, self.step,
-                            self.cfg, extra, self.skip_prefixes)
+        kept = self.run_dir / f"step_{self.step:08d}.pt"
+        if keep and self.step % keep == 0 and not kept.exists():
+            try:
+                os.link(last, kept)             # the same file under a second name: no second write
+            except OSError:
+                shutil.copyfile(last, kept)
         self.sync()
 
     def sync(self, wait: bool = False) -> None:

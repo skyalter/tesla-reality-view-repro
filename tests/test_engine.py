@@ -181,6 +181,12 @@ class TrainerTest(unittest.TestCase):
         self.assertTrue(run(self.path("resumed"), stop_at_step=15)["finished"])
         self.assert_same_weights("straight", "resumed")
 
+    def test_kept_checkpoints_stay_as_they_were_written(self):
+        run(self.path("kept"), total_steps=21, checkpoint_every=7, keep_every=7)
+        steps = {name: torch.load(self.path(f"kept/{name}"), weights_only=False)["step"]
+                 for name in ("step_00000007.pt", "step_00000014.pt", "step_00000021.pt", "last.pt")}
+        self.assertEqual(steps, {"step_00000007.pt": 7, "step_00000014.pt": 14, "step_00000021.pt": 21, "last.pt": 21})
+
     def test_a_time_limit_stops_the_run_with_a_checkpoint(self):
         result = run(self.path("limited"), max_minutes=1e-9)
         self.assertEqual((result["finished"], result["step"]), (False, 0))
