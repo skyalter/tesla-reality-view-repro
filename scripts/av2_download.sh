@@ -76,7 +76,10 @@ keep_for_mode() {
 
 # Bucket listing of one log as "<relative path><TAB><size>", sorted.
 expected() {
-  s5 ls "$BUCKET/$SPLIT/$1/*" | awk '{print $NF "\t" $(NF-1)}' | keep_for_mode | LC_ALL=C sort
+  # Every file kept in metadata-only mode is a .feather file, so a narrower listing is enough there.
+  local pattern='*'
+  [ "$META_ONLY" = 1 ] && pattern='*.feather'
+  s5 ls "$BUCKET/$SPLIT/$1/$pattern" | awk '{print $NF "\t" $(NF-1)}' | keep_for_mode | LC_ALL=C sort
 }
 
 # ---------------------------------------------------------------- download

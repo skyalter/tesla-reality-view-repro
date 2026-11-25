@@ -1,0 +1,18 @@
+# Packages of the cluster environment, pinned to the versions of the development workstation.
+# torch and torchvision are installed separately by setup_env.sh, from the PyTorch index that matches
+# the cluster's GPU driver. All of these have wheels for glibc 2.28.
+numpy==2.5.4
+pandas==3.1.1
+pyarrow==26.0.1
+scipy==1.18.1
+# headless: compute nodes have no display libraries
+opencv-python-headless==5.1.0.95
+pillow==13.0.0
+matplotlib==3.11.2
+imageio==2.38.2
+imageio-ffmpeg==0.8.1
+einops==0.8.2
+safetensors==0.8.0
+tqdm==4.70.1
+PyYAML==6.0.4
+gsplat==1.5.3

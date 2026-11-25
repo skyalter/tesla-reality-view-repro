@@ -11,7 +11,8 @@ if [ -f "$LH_DIR/local.env" ]; then
   set +a
 fi
 
-RV_TOOLS_ENV="${RV_TOOLS_ENV:-rv-tools}"
+# Name of the project's conda environment; the same name as on the development workstation.
+RV_ENV="${RV_ENV:-realityview}"
 
 # Call from scripts that need the storage layout.
 rv_require_scratch() {
@@ -24,14 +25,15 @@ rv_require_scratch() {
 rv_conda() {
   : "${RV_CONDA_SH:?RV_CONDA_SH is not set in lighthouse/local.env}"
   [ -f "$RV_CONDA_SH" ] || { echo "conda.sh not found: $RV_CONDA_SH" >&2; return 1; }
-  # conda's hook reads unset variables; relax "set -u" while sourcing and activating.
+  # conda's hook reads unset variables; relax "set -u" while it runs.
   set +u
   # shellcheck disable=SC1090
   . "$RV_CONDA_SH"
 }
 
-rv_activate_tools() {
+# Activates the project environment. Packages in ~/.local are never mixed in.
+rv_activate() {
   rv_conda
-  conda activate "$RV_TOOLS_ENV" || { echo "environment $RV_TOOLS_ENV is missing; run lighthouse/setup_tools_env.sh" >&2; return 1; }
-  set -u
+  conda activate "$RV_ENV" || { echo "environment $RV_ENV is missing; run lighthouse/setup_env.sh" >&2; return 1; }
+  export PYTHONNOUSERSITE=1
 }

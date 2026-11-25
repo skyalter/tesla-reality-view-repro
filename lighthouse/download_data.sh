@@ -2,6 +2,7 @@
 # Download what stage 1 needs onto the cluster: Argoverse 2 Sensor logs and pretrained weights.
 # Run on a node with internet access; on a login node, run it inside tmux so it survives a dropped
 # connection. Safe to re-run: finished parts are skipped, interrupted parts resume.
+# Needs only s5cmd and python3 (3.8 or newer) on PATH; no conda environment.
 #
 # Usage: lighthouse/download_data.sh [--dry-run] [--only train|val|weights] [--workers N]
 #
@@ -24,13 +25,17 @@ while [ $# -gt 0 ]; do
     --dry-run) EXTRA+=(--dry-run); shift ;;
     --only) ONLY="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
-    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 case "$ONLY" in ""|train|val|weights) ;; *) echo "--only must be train, val or weights" >&2; exit 2 ;; esac
 
-rv_activate_tools
+export S5CMD="${S5CMD:-$(command -v s5cmd || true)}"
+[ -x "$S5CMD" ] || { echo "s5cmd is not on PATH: install it (https://github.com/peak/s5cmd) or set S5CMD to its path" >&2; exit 2; }
+PYTHON="$(command -v python3 || true)"
+[ -n "$PYTHON" ] && "$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 8))' || { echo "python3 3.8 or newer is needed on PATH" >&2; exit 2; }
+echo "s5cmd: $S5CMD ($("$S5CMD" version))   python: $("$PYTHON" --version 2>&1)"
 LISTS="$REPO_DIR/data_lists"
 AV2="$REPO_DIR/scripts/av2_download.sh"
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
@@ -61,7 +66,7 @@ fi
 
 if want weights; then
   echo "== pretrained weights"
-  python3 "$REPO_DIR/scripts/download_weights.py" --dest "$RV_WEIGHTS" --set stage1 ${EXTRA[@]+"${EXTRA[@]}"} || status=1
+  "$PYTHON" "$REPO_DIR/scripts/download_weights.py" --dest "$RV_WEIGHTS" --set stage1 ${EXTRA[@]+"${EXTRA[@]}"} || status=1
 fi
 
 if [ "$status" = 0 ]; then echo "all requested parts are complete"; else echo "something is incomplete; read the messages above and run again" >&2; fi
