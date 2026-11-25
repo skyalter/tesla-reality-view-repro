@@ -65,8 +65,11 @@ DEFAULT_CONFIG = {
         "sync_tol_ms": 25.0,  # |sweep_ts + offset_ns - camera_ts| for points inside dynamic boxes
         "z_min_m": 0.5,
         "z_max_m": 250.0,
-        "lidar_box_margin_lw_m": 0.3,  # dynamic boxes grow by this in length and width
-        "lidar_box_margin_h_m": 0.2,  # and by this in height, when removing points from the static set
+        # when removing points from the static set, dynamic boxes grow by these margins on EVERY side
+        # (length and width +0.3 m per side, height +0.2 m per side). This is the margin under which the
+        # design review measured < 0.7 % of moving-object points leaking out of the box.
+        "lidar_box_margin_lw_per_side_m": 0.3,
+        "lidar_box_margin_h_per_side_m": 0.2,
         "seethrough_window": 5,
         "seethrough_ratio": 1.2,  # flag 4 if depth > ratio * min depth in the window
     },
@@ -79,8 +82,10 @@ DEFAULT_CONFIG = {
     },
     "masks": {
         # applied when box masks are drawn at read time (not stored)
-        "margin_lw_m": 0.3,
-        "margin_h_m": 0.2,
+        # same per-side margins as for the LiDAR; the box is also extended at both ends along its velocity
+        # by |v| * velocity_stretch_s
+        "margin_lw_per_side_m": 0.3,
+        "margin_h_per_side_m": 0.2,
         "velocity_stretch_s": 0.1,
         "dilate_px": 2,
         "face_samples": 9,

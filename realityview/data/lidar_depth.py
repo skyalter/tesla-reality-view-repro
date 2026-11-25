@@ -81,7 +81,8 @@ class SweepCache:
             return self._cache[k]
         sw = read_sweep(self.files[k])
         lc = self.cfg["lidar"]
-        dyn = points_in_boxes(sw.xyz, self.boxes_at(k), lc["lidar_box_margin_lw_m"], lc["lidar_box_margin_h_m"])
+        dyn = points_in_boxes(sw.xyz, self.boxes_at(k), lc["lidar_box_margin_lw_per_side_m"],
+                              lc["lidar_box_margin_h_per_side_m"])
         T = self.poses.city_T_ego(sw.timestamp_ns)
         item = {
             "city": transform_points(T, sw.xyz),
@@ -175,7 +176,7 @@ def two_lidar_consistency(cache: SweepCache, k: int, cam_ts: int, rng_m=(3.0, 40
 
     - ``up_vs_down``: up_lidar vs down_lidar points of sweep k;
     - ``sweep_vs_next``: sweep k vs sweep k+1, both moved to camera time (exercises the per-sweep chain).
-    Static points: 3..40 m horizontal range, > 0.5 m above the ego origin, outside every box (+0.3 m).
+    Static points: 3..40 m horizontal range, > 0.5 m above the ego origin, outside every box (+ margins).
     """
     from scipy.spatial import cKDTree
 
@@ -185,7 +186,7 @@ def two_lidar_consistency(cache: SweepCache, k: int, cam_ts: int, rng_m=(3.0, 40
     def static(kk):
         s = cache.get(kk)
         anyb = points_in_boxes(s["ego"], cache.boxes_at(kk, dynamic_only=False),
-                               lc["lidar_box_margin_lw_m"], lc["lidar_box_margin_h_m"])
+                               lc["lidar_box_margin_lw_per_side_m"], lc["lidar_box_margin_h_per_side_m"])
         r = np.linalg.norm(s["ego"][:, :2], axis=1)
         keep = (r >= rng_m[0]) & (r <= rng_m[1]) & (s["ego"][:, 2] > min_height_m) & ~anyb
         return transform_points(ego_T_city, s["city"][keep]), s["up"][keep]

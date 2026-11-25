@@ -145,15 +145,18 @@ def interpolate_boxes(tracks: pd.DataFrame, query_ts: np.ndarray, cfg: dict) -> 
 
 
 def points_in_boxes(pts: np.ndarray, boxes: pd.DataFrame, margin_lw: float, margin_h: float) -> np.ndarray:
-    """Which ego-frame points lie inside any of the given ego-frame boxes (annotation rows), grown by margins."""
+    """Which ego-frame points lie inside any of the given ego-frame boxes (annotation rows).
+
+    The boxes grow by ``margin_lw`` on each side in length and width and by ``margin_h`` on each side in
+    height (a 4 m long box with margin 0.3 is tested as 4.6 m long)."""
     inside = np.zeros(len(pts), bool)
     if len(boxes) == 0 or len(pts) == 0:
         return inside
     ctr = boxes[["tx_m", "ty_m", "tz_m"]].to_numpy(np.float64)
     R = quat_to_rotmat(boxes[["qw", "qx", "qy", "qz"]].to_numpy(np.float64))
-    half = np.stack([boxes["length_m"].to_numpy() / 2 + margin_lw / 2,
-                     boxes["width_m"].to_numpy() / 2 + margin_lw / 2,
-                     boxes["height_m"].to_numpy() / 2 + margin_h / 2], axis=1)
+    half = np.stack([boxes["length_m"].to_numpy() / 2 + margin_lw,
+                     boxes["width_m"].to_numpy() / 2 + margin_lw,
+                     boxes["height_m"].to_numpy() / 2 + margin_h], axis=1)
     rad = np.linalg.norm(half, axis=1)
     for b in range(len(boxes)):
         near = np.nonzero(np.abs(pts - ctr[b]).max(axis=1) <= rad[b])[0]
@@ -180,7 +183,7 @@ def draw_box_mask(boxes: pd.DataFrame, cam_T_city: np.ndarray, K: np.ndarray, wh
                   bits=None) -> np.ndarray:
     """uint8 mask at (H, W): bit 1 moving, bit 2 person-like, bit 4 any box.
 
-    Each box is grown (length/width + margin, height + margin), swept along its velocity by
+    Each box is grown (length/width/height + the per-side margins on every side), swept along its velocity by
     |v| * velocity_stretch_s (centred), sampled on its six faces, projected (points behind the camera are
     dropped), filled as a convex hull, then dilated. Boxes partly outside the image are still drawn.
     ``bits`` optionally restricts which boxes are drawn, e.g. MASK_MOVING | MASK_PERSON.
@@ -194,9 +197,9 @@ def draw_box_mask(boxes: pd.DataFrame, cam_T_city: np.ndarray, K: np.ndarray, wh
     stretch = float(mc["velocity_stretch_s"])
     ctr = boxes[["cx", "cy", "cz"]].to_numpy(np.float64)
     R = quat_to_rotmat(boxes[["cqw", "cqx", "cqy", "cqz"]].to_numpy(np.float64))
-    half = np.stack([boxes["length_m"].to_numpy() + mc["margin_lw_m"],
-                     boxes["width_m"].to_numpy() + mc["margin_lw_m"],
-                     boxes["height_m"].to_numpy() + mc["margin_h_m"]], 1) / 2
+    half = np.stack([boxes["length_m"].to_numpy() / 2 + mc["margin_lw_per_side_m"],
+                     boxes["width_m"].to_numpy() / 2 + mc["margin_lw_per_side_m"],
+                     boxes["height_m"].to_numpy() / 2 + mc["margin_h_per_side_m"]], 1)
     vel = np.nan_to_num(boxes[["vx", "vy", "vz"]].to_numpy(np.float64))
     moving = boxes["moving"].to_numpy(bool)
     person = boxes["person_like"].to_numpy(bool)
