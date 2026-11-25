@@ -32,6 +32,9 @@ class IncompleteLogError(RuntimeError):
 
 
 def code_commit(repo_dir: str) -> str:
+    """The commit of the running code. A job that runs a code snapshot without .git passes it in RV_CODE_VERSION."""
+    if os.environ.get("RV_CODE_VERSION"):
+        return os.environ["RV_CODE_VERSION"]
     try:
         sha = subprocess.run(["git", "-C", repo_dir, "rev-parse", "HEAD"], capture_output=True, text=True,
                              check=True).stdout.strip()

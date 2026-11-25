@@ -9,8 +9,10 @@ Usage (from the repository root):
 What it does:
 - collects every log's CHECKS.json (written by preprocess.py) into one table;
 - split lists: data_lists/av2_train_stage1.txt, av2_val_dev10.txt, av2_val_report20.txt pairwise disjoint;
-- --overlays: per log, two 7-camera mosaics of one moment (LiDAR depth on the photos; box masks on the
-  photos), written to <out-root>/overlays/<split>/;
+- sky scores (when scripts/sky_scores.py has run): one per image, right size, no sky at the bottom of the
+  pictures; --require-sky makes a log without sky scores a failure;
+- --overlays: per log, 7-camera mosaics of one moment (LiDAR depth on the photos; box masks on the photos;
+  sky scores on the photos when they exist), written to <out-root>/overlays/<split>/;
 - --read-samples N: reads N stage-1 samples with the training reader and reports errors and speed;
 - --repro LOG: processes LOG again into a scratch root and compares the sha256 of every file except DONE.
 A JSON summary goes to <out-root>/checks_<split>.json. Exit status 1 if anything failed.
@@ -36,10 +38,10 @@ if REPO not in sys.path:
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-from realityview.data.checks import overlay_mosaic  # noqa: E402
+from realityview.data.checks import check_sky, overlay_mosaic  # noqa: E402
 from realityview.data.config import CAMS, default_config, load_root_config  # noqa: E402
 from realityview.data.splits import check_root_splits, default_lists, overlaps, read_list, val_fixed_moments  # noqa: E402,E501
-from realityview.data.store import LogStore, find_log  # noqa: E402
+from realityview.data.store import SKY_DONE, LogStore, find_log  # noqa: E402
 
 
 def parse_args():
@@ -48,6 +50,7 @@ def parse_args():
     p.add_argument("--split", required=True)
     p.add_argument("--logs", default=None, help="list file or comma-separated ids; default: all processed logs")
     p.add_argument("--overlays", action="store_true")
+    p.add_argument("--require-sky", action="store_true", help="a log without sky scores counts as failed")
     p.add_argument("--overlay-dir", default=None, help="where overlays go (default <out-root>/overlays/<split>)")
     p.add_argument("--moment", type=int, default=None, help="front-center frame for overlays (default: middle)")
     p.add_argument("--read-samples", type=int, default=0)
@@ -102,6 +105,11 @@ def draw_overlays(args, cfg, log_id, store):
     p = os.path.join(od, f"{log_id}_i{i:03d}_lidar_single.jpg")
     cv2.imwrite(p, img, [cv2.IMWRITE_JPEG_QUALITY, 90])
     paths.append(p)
+    if store.exists(SKY_DONE):
+        img = overlay_mosaic(store, frames, m, cfg, "sky", em, meta=meta)
+        p = os.path.join(od, f"{log_id}_i{i:03d}_sky.jpg")
+        cv2.imwrite(p, img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        paths.append(p)
     return paths
 
 
@@ -112,7 +120,10 @@ def read_samples(args, logs, n):
 
     torch.set_num_threads(1)
     cv2.setNumThreads(1)
-    ds = Stage1Dataset(args.out_root, args.split, logs, require_checks=False, allow_missing_logs=True)
+    with_sky = all(os.path.isfile(os.path.join(args.out_root, "logs", args.split, log_id, SKY_DONE)) or
+                   (find_log(args.out_root, args.split, log_id) or "").endswith(".zip") for log_id in logs)
+    ds = Stage1Dataset(args.out_root, args.split, logs, require_checks=False, allow_missing_logs=True,
+                       with_sky=with_sky)
     rng = np.random.default_rng(0)
     idx = rng.permutation(len(ds))
     idx = np.concatenate([idx] * (n // max(len(idx), 1) + 1))[:n]
@@ -179,8 +190,12 @@ def main():
         store = LogStore(path)
         ck = store.json("CHECKS.json")
         failed = [k for k, v in ck["checks"].items() if v.get("passed") is False]
-        out["logs"][log_id] = {"passed": ck["passed"], "failed": failed}
-        print(f"{log_id:38s} {'ok' if ck['passed'] else 'FAIL':7s} {', '.join(failed)}")
+        sky = check_sky(store, store.parquet("frames.parquet"), cfg)
+        if sky["passed"] is False or (sky["passed"] is None and args.require_sky):
+            failed.append("sky")
+        out["logs"][log_id] = {"passed": not failed, "failed": failed, "sky": sky}
+        note = "" if sky["passed"] is not None else "  (no sky scores yet)"
+        print(f"{log_id:38s} {'ok' if not failed else 'FAIL':7s} {', '.join(failed)}{note}")
         if args.overlays:
             try:
                 out["logs"][log_id]["overlays"] = draw_overlays(args, cfg, log_id, store)

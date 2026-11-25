@@ -20,8 +20,10 @@ returns, slot-major:
   optional:
     depth_single, depth_single_flag   the single-sweep layer (``load_single_layer=True``)
     box_mask    uint8 (N, H, W) 1 moving, 2 person-like, 4 any box (``with_box_masks=True``)
+    sky         float32 (N, H, W) raw sky score of DA3METRIC-LARGE (``with_sky=True``): 0 on ground and
+                buildings, around 1 on sky; thresholds are applied by the loss. Needs scripts/sky_scores.py.
 
-Sky scores are not produced yet; nothing sky-related is returned. Normalisation is left to the GPU.
+Normalisation is left to the GPU.
 
 Two switches are configuration:
 - ``input_offsets``: which moments are inputs, in front-center frames relative to t (default (0, -10));
@@ -42,7 +44,9 @@ from .config import CAMS, FRONT_CENTER, load_root_config
 from .geometry import se3_from_quat_trans, se3_inv
 from .images import FRONT_CENTER_MODES, front_center_views, stored_size
 from .splits import check_root_splits
-from .store import LogStore, find_log, img_relpath
+from .store import SKY_DONE, LogStore, find_log, img_relpath
+
+SKY_UINT8_SCALE = 100.0     # stored sky value = round(raw score * 100); the same constant as in models/sky.py
 
 
 def valid_moments(moments, offsets) -> np.ndarray:
@@ -80,7 +84,8 @@ def load_root_ego_masks(processed_root: str, cfg: dict) -> dict[str, np.ndarray]
 class Stage1Dataset(Dataset):
     def __init__(self, processed_root: str, split: str, log_ids, input_offsets=(0, -10),
                  front_center_mode: str = "crop", depth_layer: str = "acc", load_single_layer: bool = False,
-                 with_box_masks: bool = False, require_checks: bool = True, allow_missing_logs: bool = False):
+                 with_box_masks: bool = False, with_sky: bool = False, require_checks: bool = True,
+                 allow_missing_logs: bool = False):
         if front_center_mode not in FRONT_CENTER_MODES:
             raise ValueError(f"front_center_mode must be one of {FRONT_CENTER_MODES}")
         if depth_layer not in ("acc", "single"):
@@ -94,6 +99,7 @@ class Stage1Dataset(Dataset):
         self.depth_layer = depth_layer
         self.load_single = load_single_layer
         self.with_box_masks = with_box_masks
+        self.with_sky = with_sky
         self.cfg = load_root_config(processed_root)
         self.split_lists = check_root_splits(processed_root)  # raises if train / dev / val overlap
         self.fc_views = front_center_views(front_center_mode, self.cfg)
@@ -101,6 +107,7 @@ class Stage1Dataset(Dataset):
         # (camera, view) per slot, in output order
         self.layout = [(c, v) for c in CAMS for v in (range(len(self.fc_views)) if c == FRONT_CENTER else [0])]
         self.logs = []  # (log_id, store)
+        self.n_moments = []  # per log: number of moments (front-center frames)
         self.samples = []  # (log index, moment i)
         self.skipped = {}
         for log_id in log_ids:
@@ -117,9 +124,13 @@ class Stage1Dataset(Dataset):
             if require_checks and not store.json("DONE").get("checks_passed", False):
                 self.skipped[log_id] = "checks failed"
                 continue
+            if with_sky and not store.exists(SKY_DONE):
+                self.skipped[log_id] = "no sky scores (run scripts/sky_scores.py)"
+                continue
             moments = store.parquet("moments.parquet")
             li = len(self.logs)
             self.logs.append((log_id, store))
+            self.n_moments.append(len(moments))
             self.samples.extend((li, int(i)) for i in valid_moments(moments, self.offsets))
         self._cache = {}
 
@@ -173,6 +184,8 @@ class Stage1Dataset(Dataset):
             dflag_s = np.zeros((n, H, W), np.uint8)
         if self.with_box_masks:
             box_mask = np.zeros((n, H, W), np.uint8)
+        if self.with_sky:
+            sky = np.zeros((n, H, W), np.uint8)
         # reference: front-center camera at t, whatever the inputs are
         ref_row = mom.iloc[i]
         ref_frame = int(ref_row[f"idx_{FRONT_CENTER}"])
@@ -196,6 +209,9 @@ class Stage1Dataset(Dataset):
                     rows = L["box_rows"].get((cam, frame))
                     bx = L["boxes"].iloc[rows] if rows is not None else L["boxes"].iloc[0:0]
                     bm = draw_box_mask(bx, se3_inv(cTw), K, (hw[1], hw[0]), self.cfg)
+                sk = store.sky(cam, ts) if self.with_sky else None
+                if sk is not None and sk.shape != hw:
+                    raise ValueError(f"{log_id}: sky score of {cam} {ts} has shape {sk.shape}, image {hw}")
                 views = self.fc_views if cam == FRONT_CENTER else [None]
                 for v_i, view in enumerate(views):
                     if view is None:
@@ -203,6 +219,8 @@ class Stage1Dataset(Dataset):
                         d = {name: sp.densify(hw) for name, sp in sparse.items()}
                         if bm is not None:
                             box_mask[k] = bm
+                        if sk is not None:
+                            sky[k] = sk
                     else:
                         images[k] = view.image(im)[:, :, ::-1]
                         Ks[k] = view.K(K, hw[1])
@@ -217,6 +235,8 @@ class Stage1Dataset(Dataset):
                             d[name] = (dd, ff)
                         if bm is not None:
                             box_mask[k] = view.mask(bm)
+                        if sk is not None:
+                            sky[k] = view.image(sk)  # padded columns get 0 = not sky (they are ego-masked anyway)
                     depth[k], dflag[k] = d["depth"]
                     if self.load_single:
                         depth_s[k], dflag_s[k] = d["single"]
@@ -247,4 +267,6 @@ class Stage1Dataset(Dataset):
             out["depth_single_flag"] = torch.from_numpy(dflag_s)
         if self.with_box_masks:
             out["box_mask"] = torch.from_numpy(box_mask)
+        if self.with_sky:
+            out["sky"] = torch.from_numpy(sky.astype(np.float32) / SKY_UINT8_SCALE)
         return out

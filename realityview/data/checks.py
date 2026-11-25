@@ -241,6 +241,46 @@ def check_boxes(boxes: pd.DataFrame, frames: pd.DataFrame) -> dict:
                 note="informational")
 
 
+def check_sky(store: LogStore, frames: pd.DataFrame, cfg: dict, n_sample: int = 40, seed: int = 0,
+              threshold: float = 0.5) -> dict:
+    """Sky scores of a log: one file per image, the right size, and no sky at the bottom of the pictures.
+
+    passed is None when the log has no sky scores yet (scripts/sky_scores.py has not run on it)."""
+    from .images import stored_size
+    from .store import SKY_DONE, sky_relpath
+
+    if not store.exists(SKY_DONE):
+        return _res(None, reason="no sky scores yet (scripts/sky_scores.py)")
+    done = store.json(SKY_DONE)
+    items = [(c, int(t)) for c, t in zip(frames["cam"], frames["timestamp_ns"])]
+    missing = [f"{c}/{t}" for c, t in items if not store.exists(sky_relpath(c, t))]
+    rng = np.random.default_rng(seed)
+    pick = rng.choice(len(items), size=min(n_sample, len(items)), replace=False)
+    wrong_size, top, bottom, whole = [], [], [], []
+    for k in pick:
+        cam, ts = items[int(k)]
+        if f"{cam}/{ts}" in missing:
+            continue
+        m = store.sky(cam, ts)
+        w, h = stored_size(cam, cfg)
+        if m.shape != (h, w):
+            wrong_size.append(f"{cam}/{ts}: {m.shape}")
+            continue
+        is_sky = m >= round(threshold * 100)
+        rows = max(1, h // 8)
+        top.append(float(is_sky[:rows].mean()))
+        bottom.append(float(is_sky[-rows:].mean()))
+        whole.append(float(is_sky.mean()))
+    bottom_share = float(np.mean(bottom)) if bottom else None
+    ok = not missing and not wrong_size and done.get("images") == len(items) and bottom_share is not None \
+        and bottom_share < 0.02
+    return _res(ok, n_images=len(items), n_missing=len(missing), missing=missing[:10], wrong_size=wrong_size[:10],
+                done=done, sampled=len(whole), threshold=threshold,
+                sky_share_top_eighth=float(np.mean(top)) if top else None, sky_share_bottom_eighth=bottom_share,
+                sky_share_whole=float(np.mean(whole)) if whole else None,
+                criterion="every image has a score of its own size; under 2 % sky in the bottom eighth of the pictures")
+
+
 def run_log_checks(log_path: str, out_dir: str, ctx, cfg: dict, raw_root=None, split=None) -> dict:
     store = LogStore(out_dir)
     frames = store.parquet("frames.parquet")
@@ -259,8 +299,8 @@ def run_log_checks(log_path: str, out_dir: str, ctx, cfg: dict, raw_root=None, s
     checks["ego_mask_points"], checks["depth_files"] = check_ego_points_and_depth(store, frames, ctx.ego_masks, cfg)
     passed = all(v["passed"] is not False for v in checks.values())
     return {"passed": passed, "checks": checks,
-            "not_run": {"sky": "needs sky scores (not produced yet)",
-                        "frozen_da3_scale": "needs the model",
+            "not_run": {"sky": "scripts/sky_scores.py, then scripts/check_data.py",
+                        "frozen_da3_scale": "scripts/eval_depth.py (needs the model)",
                         "transfer_sha256": "cluster-side",
                         "overlays": "scripts/check_data.py --overlays (human review)"}}
 
@@ -278,11 +318,12 @@ def _depth_colors(z, zmin=2.0, zmax=80.0):
 
 def overlay_mosaic(store: LogStore, frames: pd.DataFrame, moment: pd.Series, cfg: dict, kind: str,
                    ego_masks: dict, layer: str = "acc", boxes: pd.DataFrame | None = None,
-                   meta: dict | None = None) -> np.ndarray:
+                   meta: dict | None = None, sky_low: float = 0.3, sky_high: float = 0.5) -> np.ndarray:
     """3x3 mosaic of the 7 cameras of one moment (front-center cropped to 518x392).
 
     kind "lidar": sparse depth points coloured by log depth (2-80 m); see-through points drawn grey.
     kind "dyn": box masks (red = moving, yellow = person-like, blue outline = any box) and the ego mask.
+    kind "sky": sky scores (blue = sky, score >= sky_high; yellow = uncertain, sky_low <= score < sky_high).
     """
     from .boxes import MASK_ANY, MASK_MOVING, MASK_PERSON, cam_T_city_from_row, draw_box_mask
     from .images import front_center_view
@@ -311,6 +352,20 @@ def overlay_mosaic(store: LogStore, frames: pd.DataFrame, moment: pd.Series, cfg
                 st = (flag[v, u] & 4) > 0
                 col[st] = (160, 160, 160)
                 im[v, u] = col
+            elif kind == "sky":
+                score = store.sky(cam, ts)
+                if cam == FRONT_CENTER:
+                    im, K, (score, ego) = front_center_view(im, K, "crop", cfg, [score, ego])
+                out = im.astype(np.float32)
+                sure, maybe = score >= round(sky_high * 100), (score >= round(sky_low * 100)) & (score < round(sky_high * 100))
+                out[sure] = out[sure] * 0.45 + np.array((255, 120, 0), np.float32) * 0.55
+                out[maybe] = out[maybe] * 0.3 + np.array((0, 230, 255), np.float32) * 0.7
+                im = out.astype(np.uint8)
+                cnt, _ = cv2.findContours(sure.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                cv2.drawContours(im, cnt, -1, (255, 255, 255), 1)
+                if ego.any():
+                    cnt, _ = cv2.findContours(ego.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    cv2.drawContours(im, cnt, -1, (255, 0, 255), 1)
             else:
                 frow = fr.loc[(cam, j)]
                 bx = boxes[(boxes["cam"] == cam) & (boxes["frame"] == j)]
@@ -339,6 +394,10 @@ def overlay_mosaic(store: LogStore, frames: pd.DataFrame, moment: pd.Series, cfg
         for zt in (2, 5, 10, 20, 40, 80):
             x = W + 40 + int(np.log(zt / 2) / np.log(40) * (W - 81))
             cv2.putText(canvas, str(zt), (x - 6, H + 188), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
+    elif kind == "sky":
+        lines += [f"sky score of DA3METRIC-LARGE", f"blue with white outline: sky (score >= {sky_high})",
+                  f"yellow: uncertain ({sky_low} <= score < {sky_high}), not supervised",
+                  "magenta outline: ego mask"]
     else:
         lines += ["red: moving box (speed > 0.5 m/s or unknown)", "yellow: person-like", "blue tint: any box",
                   "magenta: ego mask", "boxes interpolated to each camera time"]

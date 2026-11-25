@@ -11,7 +11,8 @@ Per log (loose directory ``logs/<split>/<log_id>/`` while developing, or one unc
     img/<cam>/<ts>.jpg         downscaled images
     depth/acc/<cam>/<ts>.npz   accumulated sparse depth: v, u uint16 (N,), z float16 (N,), flag uint8 (N,)
     depth/single/<cam>/<ts>.npz  single-sweep sparse depth, same keys
-    sky/                       reserved for sky scores (not produced yet)
+    sky/<cam>/<ts>.png         raw sky score x 100 as uint8, at the stored image size (scripts/sky_scores.py)
+    sky/DONE                   written when every image of the log has its sky score
     CHECKS.json, DONE
 """
 from __future__ import annotations
@@ -79,6 +80,13 @@ def depth_relpath(layer: str, cam: str, ts: int) -> str:
     return f"depth/{layer}/{cam}/{int(ts)}.npz"
 
 
+SKY_DONE = "sky/DONE"
+
+
+def sky_relpath(cam: str, ts: int) -> str:
+    return f"sky/{cam}/{int(ts)}.png"
+
+
 class LogStore:
     """Read files of one processed log from a loose directory or a stored zip."""
 
@@ -119,6 +127,15 @@ class LogStore:
 
     def depth(self, layer: str, cam: str, ts: int) -> SparseDepth:
         return depth_from_bytes(self.read(depth_relpath(layer, cam, ts)))
+
+    def sky(self, cam: str, ts: int) -> np.ndarray:
+        """Stored sky score of one image: uint8 (H, W), raw score x 100 (see realityview/models/sky.py)."""
+        import cv2
+
+        m = cv2.imdecode(np.frombuffer(self.read(sky_relpath(cam, ts)), np.uint8), cv2.IMREAD_GRAYSCALE)
+        if m is None:
+            raise IOError(f"cannot decode {self.path}/{sky_relpath(cam, ts)}")
+        return m
 
     def __getstate__(self):
         d = dict(self.__dict__)

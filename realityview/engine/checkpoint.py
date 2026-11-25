@@ -9,7 +9,10 @@ import torch
 
 
 def code_version() -> str:
-    """The git commit of the code that is running, or "unknown" outside a git checkout."""
+    """The git commit of the code that is running, or "unknown" outside a git checkout.
+    A job that runs a code snapshot without .git passes the commit in RV_CODE_VERSION."""
+    if os.environ.get("RV_CODE_VERSION"):
+        return os.environ["RV_CODE_VERSION"]
     try:
         root = Path(__file__).resolve().parents[2]
         out = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
