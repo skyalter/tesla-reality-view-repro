@@ -185,6 +185,17 @@ class MetricsTest(unittest.TestCase):
         self.assertAlmostEqual(metrics.compute()["absrel_single"], out["absrel_single"])
         self.assertEqual(metrics.compute()["pixels_single"], 10.0)
 
+    def test_the_median_ignores_a_few_wild_points(self):
+        g = torch.Generator().manual_seed(0)
+        gt = 5.0 + 50.0 * torch.rand(1, 1, 100, 100, generator=g)
+        pred = gt * 1.03
+        pred[0, 0, :3] = gt[0, 0, :3] * 6.0            # 3 % of the points are six times too far
+        metrics = D.DepthMetrics(["cam"])
+        metrics.update("x", pred, gt, torch.ones_like(gt, dtype=torch.bool), torch.zeros(1, 1, dtype=torch.long))
+        out = metrics.compute()
+        self.assertAlmostEqual(out["medrel_x"], 0.03, delta=0.001)
+        self.assertAlmostEqual(out["absrel_x"], 0.97 * 0.03 + 0.03 * 5.0, places=4)
+
     def test_median_scale(self):
         gt = torch.full((2, 1, 4, 4), 10.0)
         pred = torch.full((2, 1, 4, 4), 4.0)

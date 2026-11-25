@@ -33,11 +33,11 @@ ROWS = (("single", "LiDAR single sweep"), ("single_aligned", "  same, scale-alig
 
 def report(metrics: dict) -> str:
     lines = [f"samples {metrics.get('samples', 0):.0f}    kappa {metrics.get('kappa', float('nan')):.4f}", "",
-             f"{'':36s}{'AbsRel':>9s}{'d<1.25':>9s}{'RMSE log':>10s}"]
+             f"{'':36s}{'AbsRel':>9s}{'median':>9s}{'d<1.25':>9s}{'RMSE log':>10s}"]
     for key, label in ROWS:
         if f"absrel_{key}" in metrics:
-            lines.append(f"{label:36s}{metrics[f'absrel_{key}']:9.4f}{metrics[f'delta1_{key}']:9.4f}"
-                         f"{metrics[f'rmse_log_{key}']:10.4f}")
+            lines.append(f"{label:36s}{metrics[f'absrel_{key}']:9.4f}{metrics[f'medrel_{key}']:9.4f}"
+                         f"{metrics[f'delta1_{key}']:9.4f}{metrics[f'rmse_log_{key}']:10.4f}")
     for key, label in (("single", "this network"), ("orig_single", "original network")):
         parts = sorted((k.split("/", 1)[1], v) for k, v in metrics.items() if k.startswith(f"absrel_{key}/"))
         if parts:
@@ -48,7 +48,8 @@ def report(metrics: dict) -> str:
                       "  by distance  " + "  ".join(f"{n} {v:.4f}" for n, v in bands),
                       "  by camera    " + "  ".join(f"{n.replace('ring_', '')} {v:.4f}" for n, v in cams)]
     others = [(k, v) for k, v in sorted(metrics.items())
-              if "/" not in k and not k.startswith(("absrel_", "delta1_", "rmse_log_", "pixels_")) and k not in ("samples", "kappa")]
+              if "/" not in k and not k.startswith(("absrel_", "medrel_", "delta1_", "rmse_log_", "pixels_"))
+              and k not in ("samples", "kappa")]
     if others:
         lines += ["", "other numbers:"] + [f"  {k:28s}{v:10.4f}" for k, v in others]
     scales = sorted((k.split("/", 1)[1], v) for k, v in metrics.items() if k.startswith("scale/"))

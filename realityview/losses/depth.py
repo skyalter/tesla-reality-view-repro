@@ -140,7 +140,13 @@ def median_scale(pred_z, target_z, mask) -> torch.Tensor:
 
 class DepthMetrics:
     """Running depth errors against LiDAR: AbsRel, delta < 1.25 and RMSE of log depth, overall, per distance
-    band and per camera. Several named sets can be kept side by side (for example two LiDAR layers)."""
+    band and per camera, plus the median relative error overall. Several named sets can be kept side by side
+    (for example two LiDAR layers).
+
+    AbsRel and the RMSE are means: a few LiDAR points that disagree with the image (points seen through a
+    nearer surface, points on moving objects) weigh heavily in them. The median does not have that problem."""
+
+    MEDIAN_BINS, MEDIAN_MAX = 4000, 2.0     # histogram of |log(pred / lidar)| for the median: steps of 0.0005
 
     def __init__(self, cam_names, bins=(0.0, 10.0, 20.0, 40.0, 80.0, 200.0)):
         self.cam_names = list(cam_names)
@@ -161,10 +167,13 @@ class DepthMetrics:
         which_bin = torch.bucketize(gt, self.edges, right=True)
         state = self.sums.setdefault(name, {
             "bin": torch.zeros(4, len(self.bin_names), dtype=torch.float64),
-            "cam": torch.zeros(4, len(self.cam_names), dtype=torch.float64)})
+            "cam": torch.zeros(4, len(self.cam_names), dtype=torch.float64),
+            "hist": torch.zeros(self.MEDIAN_BINS, dtype=torch.float64)})
         for key, index, size in (("bin", which_bin, len(self.bin_names)), ("cam", cams, len(self.cam_names))):
             for row, weights in enumerate((torch.ones_like(rel), rel, hit, sq)):
                 state[key][row] += torch.bincount(index, weights=weights, minlength=size)[:size]
+        log_error = torch.sqrt(sq).clamp(max=self.MEDIAN_MAX * (1 - 1e-9))
+        state["hist"] += torch.histc(log_error, bins=self.MEDIAN_BINS, min=0.0, max=self.MEDIAN_MAX)
 
     @staticmethod
     def _summary(rows: torch.Tensor) -> dict:
@@ -172,13 +181,17 @@ class DepthMetrics:
         return {"absrel": rows[1] / n, "delta1": rows[2] / n, "rmse_log": torch.sqrt(rows[3] / n)}
 
     def compute(self) -> dict:
-        """{"absrel_<name>": ..., "absrel_<name>/<band or camera>": ..., "pixels_<name>": ...} as floats."""
+        """{"absrel_<name>": ..., "absrel_<name>/<band or camera>": ..., "pixels_<name>": ...} as floats.
+        "medrel_<name>" is the median of |pred / lidar - 1| taken in log space, exp(median |log ratio|) - 1."""
         out = {}
         for name, state in self.sums.items():
             total = state["bin"].sum(1, keepdim=True)
             for metric, value in self._summary(total).items():
                 out[f"{metric}_{name}"] = float(value[0])
             out[f"pixels_{name}"] = float(total[0, 0])
+            cumulative = torch.cumsum(state["hist"], 0)
+            middle = int(torch.searchsorted(cumulative, cumulative[-1] / 2))
+            out[f"medrel_{name}"] = math.exp((middle + 0.5) * self.MEDIAN_MAX / self.MEDIAN_BINS) - 1.0
             for key, labels in (("bin", self.bin_names), ("cam", self.cam_names)):
                 summary = self._summary(state[key])
                 for i, label in enumerate(labels):

@@ -235,6 +235,7 @@ class Stage1BackboneTask:
             return text + (f" (original {m[original]:.4f})" if original in m else "")
 
         parts = [f"AbsRel {pair('absrel_single', 'absrel_orig_single')}",
+                 f"median error {pair('medrel_single', 'medrel_orig_single')}",
                  f"scale-aligned {pair('absrel_single_aligned', 'absrel_orig_single_aligned')}",
                  f"d<1.25 {pair('delta1_single', 'delta1_orig_single')}",
                  f"overlap {pair('overlap_median', 'orig_overlap_median')}"]
