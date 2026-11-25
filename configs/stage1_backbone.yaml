@@ -1,0 +1,41 @@
+# Stage 1, first part: train the backbone on depth (LiDAR, sky, frozen original network). No rendering.
+# The full run: 8 GPUs, one sample each.
+#
+#   torchrun --nproc_per_node=8 scripts/train.py --config configs/stage1_backbone.yaml \
+#       --set run_dir=<dir> data.root=<processed root> model.weights_root=<weights dir>
+#
+# Values not listed here keep the defaults in realityview/tasks/stage1_backbone.py and
+# realityview/engine/trainer.py. The choices that are still open are listed with their alternatives.
+task: stage1_backbone
+seed: 0
+total_steps: 10000
+batch_size: 1                 # per GPU
+num_workers: 4                # data-loading processes per GPU
+schedule: {warmup_steps: 500, min_lr: 1.0e-6}
+grad_clip: 1.0
+log_every: 20
+checkpoint_every: 500
+keep_every: 2500
+eval_every: 1000
+eval_at_start: true           # the first evaluation is the original network: the baseline
+
+model:
+  name: da3-large-1.1
+  weights_root: ${RV_WEIGHTS}
+  pose_scale: 20.0            # open: 20 (default) | 6.7 | ...; compare with scripts/eval_depth.py before training
+  freeze: default             # open: default = layers 8-23 + camera encoder + time encoding | late = layers 18-23
+  lr_backbone: 2.0e-5
+  lr_head: 2.0e-4
+
+data:
+  root: ${RV_PROCESSED}
+  train_logs: data_lists/av2_train_stage1.txt
+  train_first: 150            # open: how many training logs
+  eval_logs: data_lists/av2_val_dev10.txt
+  input_offsets: [0, -10]     # open: t and t - 0.5 s (default) | other moments
+  front_center_mode: crop     # open: crop (default) | split | letterbox
+
+loss:
+  lidar: {weight: 1.0}
+  sky: {weight: 0.1}
+  anchor: {weight: 0.1}       # open: set after measuring the size of each term on the original network

@@ -1,0 +1,23 @@
+# Debugging on one small GPU: the smaller backbone (DA3-BASE) memorises the first two training logs.
+# The evaluation uses fixed moments of the same two logs, so the depth error must drop clearly below the
+# original network's.
+#
+#   python scripts/train.py --config configs/stage1_overfit_base.yaml \
+#       --set run_dir=<dir> data.root=<processed root> model.weights_root=<weights dir>
+base: stage1_backbone.yaml
+total_steps: 1500
+num_workers: 6
+schedule: {warmup_steps: 100, min_lr: 1.0e-6}
+log_every: 25
+checkpoint_every: 250
+keep_every: 0
+eval_every: 500
+
+model:
+  name: da3-base
+
+data:
+  train_first: 2
+  eval_split: train
+  eval_logs: data_lists/av2_train_stage1.txt
+  eval_first: 2
