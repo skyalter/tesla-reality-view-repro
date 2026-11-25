@@ -1,0 +1,12 @@
+# A tiny regression problem, to try the training loop without data or pretrained weights:
+#   python scripts/train.py --config configs/toy.yaml --set run_dir=/tmp/toy_run
+task: toy
+seed: 0
+device: cpu
+total_steps: 200
+batch_size: 16
+num_workers: 0
+schedule: {warmup_steps: 20, min_lr: 1.0e-5}
+log_every: 20
+checkpoint_every: 50
+toy: {train_size: 256, eval_size: 64, width: 32, lr: 1.0e-2, dropout: 0.1}
