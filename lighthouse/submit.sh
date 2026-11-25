@@ -112,6 +112,16 @@ if [ "$DRY_RUN" = 1 ]; then
   exit 0
 fi
 
+# Results must be able to reach long-term storage before a job is worth queueing.
+if [ -n "${RV_NAS:-}" ]; then
+  if ! (rv_activate && rclone mkdir "$RV_NAS" && rclone lsf "$RV_NAS" --max-depth 1 >/dev/null); then
+    echo "cannot reach $RV_NAS through rclone; run lighthouse/check_nas.sh, or unset RV_NAS to keep results on scratch" >&2
+    exit 1
+  fi
+else
+  echo "note: RV_NAS is not set in lighthouse/local.env; results will stay on scratch" >&2
+fi
+
 if [ ! -f "$CODE/.complete" ]; then
   mkdir -p "$CODE"
   git -C "$REPO_DIR" archive "$COMMIT" | tar -x -C "$CODE"
