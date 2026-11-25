@@ -3,9 +3,9 @@
 An independent attempt to reproduce the **Reality View** of Tesla FSD v15 using public material only:
 public statements about the system, public datasets and open-source code. Not affiliated with Tesla.
 
-**Status: work in progress. Nothing is trained yet.** The repository holds what the first training step
-needs: data download and processing, the backbone and depth head, the depth losses, a multi-GPU training
-loop and the depth evaluation. The Gaussian head, rendering and the diffusion model will follow.
+**Status: work in progress. Nothing is trained yet.** The repository holds the code of stage 1: data
+download and processing, the backbone and depth head with the depth losses, the Gaussian head with rendering
+and the photo losses, a multi-GPU training loop and the evaluations. The diffusion model will follow.
 
 ## What is being built
 
@@ -22,16 +22,19 @@ and above the car, in real time. The plan follows what has been said publicly ab
 
 Stage 1 is trained in two parts. First the backbone alone, on depth: LiDAR depth, sky pushed far away,
 and, where there is no LiDAR, staying close to a frozen copy of the original network; no rendering. Then
-the backbone is frozen and the Gaussian head is trained with rendering losses. This repository currently
-covers the first part.
+the backbone is frozen and the Gaussian head is trained with rendering losses: every input pixel becomes a
+Gaussian at its predicted depth, and the Gaussians are rendered into the cameras of the input moment and of
+another moment up to a second away and compared with the photos.
 
 ## Layout
 
 ```
 realityview/
   data/       offline processing of Argoverse 2 logs and the training reader   (data/README.md)
-  models/     backbone, depth head, frozen reference, sky scorer; da3/ holds the Depth Anything 3 model files
-  losses/     depth losses and depth metrics
+  models/     backbone, depth head, frozen reference, Gaussian head, sky scorer; da3/ holds the
+              Depth Anything 3 model files
+  render/     one Gaussian per pixel, rendering with gsplat, coverage, the chase camera
+  losses/     depth losses and depth metrics; losses that compare renders with photos
   engine/     training loop: multi-GPU, exact resume, checkpoints, configuration
   tasks/      what can be trained: the model, data and losses of one training run
 configs/      one YAML file per run; open design choices are switches in there
@@ -62,7 +65,19 @@ torchrun --nproc_per_node=8 scripts/train.py --config configs/stage1_backbone.ya
 
 # on one small GPU: the smaller backbone memorises two logs
 python scripts/train.py --config configs/stage1_overfit_base.yaml --set run_dir=<run> data.root=... model.weights_root=...
+
+# train the Gaussian head on the frozen backbone (needs gsplat and lpips)
+torchrun --nproc_per_node=8 scripts/train.py --config configs/stage1_head.yaml \
+    --set run_dir=<run> data.root=<processed>/av2_v1 model.weights_root=<weights> \
+          model.backbone_checkpoint=<backbone run>/last.pt
+
+# on one small GPU: the head on the smaller backbone memorises two logs
+python scripts/train.py --config configs/stage1_head_overfit_base.yaml --set run_dir=<run> data.root=... \
+    model.weights_root=... model.backbone_checkpoint=<overfit backbone run>/last.pt
 ```
+
+The head training writes comparison images to `<run>/eval_images/`: photos on top, renders below, one
+column per camera.
 
 Tests use the standard library only: `python -m unittest discover -s tests`. Tests that need real data,
 pretrained weights or a GPU are skipped unless `AV2_RAW_ROOT`, `RV_PROCESSED_ROOT` and `RV_WEIGHTS_ROOT` are set.

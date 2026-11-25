@@ -20,5 +20,9 @@ dependencies = [
     "safetensors>=0.4",
 ]
 
+[project.optional-dependencies]
+# the Gaussian head: rendering and the perceptual loss
+render = ["gsplat>=1.5", "lpips>=0.1.4", "torchvision"]
+
 [tool.setuptools.packages.find]
 include = ["realityview*"]

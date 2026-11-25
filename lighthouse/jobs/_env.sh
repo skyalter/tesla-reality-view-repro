@@ -10,6 +10,13 @@ export RV_PROCESSED="${RV_PROCESSED:-$RV_SCRATCH/processed/av2_v1}"
 export RV_RUNS="${RV_RUNS:-$RV_SCRATCH/runs}"
 export PYTHONPATH="$RV_CODE${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
+# gsplat compiles its CUDA code on first use, with the CUDA toolkit inside the environment.
+export CUDA_HOME="$CONDA_PREFIX"
+export CPATH="$CONDA_PREFIX/targets/x86_64-linux/include${CPATH:+:$CPATH}"
+export LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:$CONDA_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+export TORCH_CUDA_ARCH_LIST='8.9;9.0'
+# Weights that libraries download themselves (torchvision VGG for LPIPS) live on scratch.
+export TORCH_HOME="${TORCH_HOME:-$RV_SCRATCH/cache/torch}"
 cd "$RV_CODE"
 echo "== ${RV_JOB:-job} '${RV_RUN_NAME:-}' on $(hostname), Slurm job ${SLURM_JOB_ID:-none}, code ${RV_CODE_VERSION:-unknown}, $(date '+%F %T')"
 

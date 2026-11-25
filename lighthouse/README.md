@@ -53,12 +53,16 @@ lighthouse/submit.sh sky --after <id>    # 1 GPU: sky scores, data checks, overl
 lighthouse/submit.sh baseline            # 1 GPU: depth errors of the original network, several pose scales
 lighthouse/submit.sh train --gpus 1 --hours 1 --name smoke -- total_steps=100 stop_at_step=50   # try it; twice
 lighthouse/submit.sh train --hours 8     # 8 GPUs: train the backbone
+lighthouse/setup_head.sh                 # once: lpips and its VGG weights for the Gaussian head
+lighthouse/submit.sh head --hours 12     # 8 GPUs: train the Gaussian head on the trained backbone
+lighthouse/submit.sh targets --gpus 1 --hours 1 --name targets_preview -- --preview   # candidate chase cameras
+lighthouse/submit.sh targets -- --back 7 --up 4 --pitch 12 --hfov 70   # 8 GPUs: chase images of the training logs
 ```
 
 A training job stops with a checkpoint 20 minutes before its time limit; submitting the same command
 again continues it. `touch $RV_SCRATCH/runs/<name>/STOP` stops it earlier without losing work.
-With `RV_NAS` set in `local.env`, checkpoints, numbers, logs and overlay pictures are copied there
-through rclone while the jobs run; processed data stays on scratch (it can be made again).
+With `RV_NAS` set in `local.env`, checkpoints, numbers, logs, overlay and comparison pictures and the
+rendered chase images are copied there through rclone; processed data stays on scratch (it can be made again).
 
 ## Scripts
 
@@ -70,5 +74,6 @@ through rclone while the jobs run; processed data stays on scratch (it can be ma
 | `test_env.sh` | checks the environment on a GPU node (runs `env_probe.py` through `srun`) |
 | `submit_test_env.sh` | the same check as a queued batch job |
 | `check_nas.sh` | checks that rclone can write to the place results are copied to |
-| `submit.sh` | submits a job: `preprocess`, `sky`, `baseline` or `train` (bodies in `jobs/`) |
+| `setup_head.sh` | adds what the Gaussian head needs: `lpips` and the VGG weights it loads |
+| `submit.sh` | submits a job: `preprocess`, `sky`, `baseline`, `train`, `head` or `targets` (bodies in `jobs/`) |
 | `common.sh` | shared settings, sourced by the others |

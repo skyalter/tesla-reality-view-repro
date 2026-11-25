@@ -16,3 +16,5 @@ safetensors==0.8.0
 tqdm==4.70.1
 PyYAML==6.0.4
 gsplat==1.5.3
+# perceptual loss of the Gaussian head; needs torchvision's VGG weights (lighthouse/setup_head.sh fetches them)
+lpips==0.1.4

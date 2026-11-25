@@ -53,7 +53,7 @@ import sys
 
 print("python", sys.version.split()[0])
 for name in ("torch", "torchvision", "numpy", "pandas", "pyarrow", "cv2", "scipy", "PIL", "matplotlib", "einops",
-             "safetensors", "yaml", "imageio", "gsplat"):
+             "safetensors", "yaml", "imageio", "gsplat", "lpips"):
     module = importlib.import_module(name)
     print(f"{name} {getattr(module, '__version__', '?')}")
 import torch
