@@ -3,6 +3,8 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
+#
+# Modified in realityview (from Depth-Anything-3 commit 3d835ec): never import xformers.
 
 from typing import Callable, Optional
 import torch.nn.functional as F
@@ -32,13 +34,9 @@ class SwiGLUFFN(nn.Module):
         return self.w3(hidden)
 
 
-try:
-    from xformers.ops import SwiGLU
-
-    XFORMERS_AVAILABLE = True
-except ImportError:
-    SwiGLU = SwiGLUFFN
-    XFORMERS_AVAILABLE = False
+# xformers is never imported: the pure PyTorch SwiGLUFFN is always used (only ViT-G uses SwiGLU).
+SwiGLU = SwiGLUFFN
+XFORMERS_AVAILABLE = False
 
 
 class SwiGLUFFNFused(SwiGLU):

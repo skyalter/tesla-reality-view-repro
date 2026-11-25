@@ -12,15 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modified in realityview (from Depth-Anything-3 commit 3d835ec): relative imports; plain dict instead of addict.Dict.
 
 from typing import Dict as TyDict
 from typing import List, Sequence, Tuple
 import torch
 import torch.nn as nn
-from addict import Dict
 from einops import rearrange
 
-from depth_anything_3.model.utils.head_utils import (
+from .utils.head_utils import (
     Permute,
     create_uv_grid,
     custom_interpolate,
@@ -164,7 +165,7 @@ class DPT(nn.Module):
         patch_start_idx: int,
         chunk_size: int = 8,
         **kwargs,
-    ) -> Dict:
+    ) -> dict:
         """
         Args:
             feats: List of 4 entries, each entry is a tensor like [B, S, T, C] (or the 0th element of tuple/list is that tensor).
@@ -186,7 +187,7 @@ class DPT(nn.Module):
         if chunk_size is None or chunk_size >= S:
             out_dict = self._forward_impl(feats, H, W, patch_start_idx, **extra_kwargs)
             out_dict = {k: v.view(B, S, *v.shape[1:]) for k, v in out_dict.items()}
-            return Dict(out_dict)
+            return dict(out_dict)
 
         out_dicts: List[TyDict[str, torch.Tensor]] = []
         for s0 in range(0, S, chunk_size):
@@ -199,7 +200,7 @@ class DPT(nn.Module):
             )
         out_dict = {k: torch.cat([od[k] for od in out_dicts], dim=0) for k in out_dicts[0].keys()}
         out_dict = {k: v.view(B, S, *v.shape[1:]) for k, v in out_dict.items()}
-        return Dict(out_dict)
+        return dict(out_dict)
 
     # -------------------------------------------------------------------------
     # Internal forward (single chunk)

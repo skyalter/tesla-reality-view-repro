@@ -12,14 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modified in realityview (from Depth-Anything-3 commit 3d835ec): relative imports; plain dict instead of addict.Dict.
 
 from typing import List, Sequence, Tuple
 import torch
 import torch.nn as nn
-from addict import Dict
-
-from depth_anything_3.model.dpt import _make_fusion_block, _make_scratch
-from depth_anything_3.model.utils.head_utils import (
+from .dpt import _make_fusion_block, _make_scratch
+from .utils.head_utils import (
     Permute,
     create_uv_grid,
     custom_interpolate,
@@ -160,7 +160,7 @@ class DualDPT(nn.Module):
         W: int,
         patch_start_idx: int,
         chunk_size: int = 8,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict:
         """
         Args:
             aggregated_tokens_list: List of 4 tensors [B, S, T, C] from transformer.
@@ -183,7 +183,7 @@ class DualDPT(nn.Module):
         if chunk_size is None or chunk_size >= S:
             out_dict = self._forward_impl(feats, H, W, patch_start_idx)
             out_dict = {k: v.reshape(B, S, *v.shape[1:]) for k, v in out_dict.items()}
-            return Dict(out_dict)
+            return dict(out_dict)
         out_dicts = []
         for s0 in range(0, B * S, chunk_size):
             s1 = min(s0 + chunk_size, B * S)
@@ -199,7 +199,7 @@ class DualDPT(nn.Module):
             for k in out_dicts[0].keys()
         }
         out_dict = {k: v.view(B, S, *v.shape[1:]) for k, v in out_dict.items()}
-        return Dict(out_dict)
+        return dict(out_dict)
 
     # -------------------------------------------------------------------------
     # Internal forward (single chunk)
@@ -211,7 +211,7 @@ class DualDPT(nn.Module):
         H: int,
         W: int,
         patch_start_idx: int,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict:
         B, _, C = feats[0].shape
         ph, pw = H // self.patch_size, W // self.patch_size
         resized_feats = []

@@ -6,12 +6,14 @@
 # References:
 #   https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/models/vision_transformer.py
+#
+# Modified in realityview (from Depth-Anything-3 commit 3d835ec): relative import.
 
 
 from typing import List
 import torch.nn as nn
 
-from depth_anything_3.model.dinov2.vision_transformer import (
+from .vision_transformer import (
     vit_base,
     vit_giant2,
     vit_large,

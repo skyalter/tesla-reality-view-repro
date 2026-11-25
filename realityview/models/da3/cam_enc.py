@@ -11,13 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modified in realityview (from Depth-Anything-3 commit 3d835ec): relative imports.
 
 import torch.nn as nn
 
-from depth_anything_3.model.utils.attention import Mlp
-from depth_anything_3.model.utils.block import Block
-from depth_anything_3.model.utils.transform import extri_intri_to_pose_encoding
-from depth_anything_3.utils.geometry import affine_inverse
+from .utils.attention import Mlp
+from .utils.block import Block
+from .utils.geometry import affine_inverse
+from .utils.transform import extri_intri_to_pose_encoding
 
 
 class CameraEnc(nn.Module):

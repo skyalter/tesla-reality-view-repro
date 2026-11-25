@@ -6,6 +6,8 @@
 # References:
 #   https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/models/vision_transformer.py
+#
+# Modified in realityview (from Depth-Anything-3 commit 3d835ec): relative imports; standard logging instead of the package logger; per-forward messages at DEBUG level.
 
 import math
 from typing import Callable, List, Sequence, Tuple, Union
@@ -15,7 +17,7 @@ import torch.nn as nn
 import torch.utils.checkpoint
 from einops import rearrange
 
-from depth_anything_3.utils.logger import logger
+import logging
 
 from .layers import LayerScale  # noqa: F401
 from .layers import Mlp  # noqa: F401
@@ -26,15 +28,15 @@ from .layers import (  # noqa: F401
     RotaryPositionEmbedding2D,
     SwiGLUFFNFused,
 )
-from depth_anything_3.model.reference_view_selector import (
+from ..reference_view_selector import (
     RefViewStrategy,
     select_reference_view,
     reorder_by_reference,
     restore_original_order,
 )
-from depth_anything_3.utils.constants import THRESH_FOR_REF_SELECTION
+from ..utils.constants import THRESH_FOR_REF_SELECTION
 
-# logger = logging.getLogger("dinov2")
+logger = logging.getLogger(__name__)
 
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
@@ -176,13 +178,13 @@ class DinoVisionTransformer(nn.Module):
                 x.item() for x in torch.linspace(0, drop_path_rate, depth)
             ]  # stochastic depth decay rule
         if ffn_layer == "mlp":
-            logger.info("using MLP layer as FFN")
+            logger.debug("using MLP layer as FFN")
             ffn_layer = Mlp
         elif ffn_layer == "swiglufused" or ffn_layer == "swiglu":
-            logger.info("using SwiGLU layer as FFN")
+            logger.debug("using SwiGLU layer as FFN")
             ffn_layer = SwiGLUFFNFused
         elif ffn_layer == "identity":
-            logger.info("using Identity layer as FFN")
+            logger.debug("using Identity layer as FFN")
 
             def f(*args, **kwargs):
                 return nn.Identity()
@@ -314,7 +316,7 @@ class DinoVisionTransformer(nn.Module):
             if self.alt_start != -1 and (i == self.alt_start - 1) and x.shape[1] >= THRESH_FOR_REF_SELECTION and kwargs.get("cam_token", None) is None:
                 # Select reference view using configured strategy
                 strategy = kwargs.get("ref_view_strategy", "saddle_balanced")
-                logger.info(f"Selecting reference view using strategy: {strategy}")
+                logger.debug(f"Selecting reference view using strategy: {strategy}")
                 b_idx = select_reference_view(x, strategy=strategy)
                 # Reorder views to place reference view first
                 x = reorder_by_reference(x, b_idx)
@@ -322,7 +324,7 @@ class DinoVisionTransformer(nn.Module):
 
             if self.alt_start != -1 and i == self.alt_start:
                 if kwargs.get("cam_token", None) is not None:
-                    logger.info("Using camera conditions provided by the user")
+                    logger.debug("Using camera conditions provided by the user")
                     cam_token = kwargs.get("cam_token")
                 else:
                     ref_token = self.camera_token[:, :1].expand(B, -1, -1)
