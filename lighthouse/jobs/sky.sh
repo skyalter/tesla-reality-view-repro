@@ -12,8 +12,8 @@ for split in train val; do
   run python scripts/sky_scores.py --out-root "$RV_PROCESSED" --split "$split" \
     --weights "$RV_WEIGHTS/da3metric-large/model.safetensors" --workers "${SLURM_CPUS_PER_TASK:-8}"
 done
-run python scripts/check_data.py --out-root "$RV_PROCESSED" --split train --overlays --read-samples 1000
-run python scripts/check_data.py --out-root "$RV_PROCESSED" --split val --overlays --read-samples 300
+run python scripts/check_data.py --out-root "$RV_PROCESSED" --split train --overlays --require-sky --read-samples 1000
+run python scripts/check_data.py --out-root "$RV_PROCESSED" --split val --overlays --require-sky --read-samples 300
 
 rv_to_nas "$RV_PROCESSED" "data_av2_v1" --include "checks_*.json" --include "overlays/**" --include "runs/**" \
   --include "CONFIG.*" --include "CODE_COMMIT.txt" --include "splits/**" || status=1
