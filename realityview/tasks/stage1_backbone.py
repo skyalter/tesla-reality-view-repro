@@ -209,12 +209,14 @@ class Stage1BackboneTask:
     @staticmethod
     def summary(m: dict) -> str:
         """One line for the console; everything else is in eval_log.jsonl."""
-        def pair(key, fmt="{:.4f}"):
-            text = fmt.format(m[key]) if key in m else "-"
-            return text + (f" (original {fmt.format(m['orig_' + key])})" if "orig_" + key in m else "")
+        def pair(key, original):
+            text = f"{m[key]:.4f}" if key in m else "-"
+            return text + (f" (original {m[original]:.4f})" if original in m else "")
 
-        parts = [f"AbsRel {pair('absrel_single')}", f"scale-aligned {pair('absrel_single_aligned')}",
-                 f"d<1.25 {pair('delta1_single')}", f"overlap {pair('overlap_median')}"]
+        parts = [f"AbsRel {pair('absrel_single', 'absrel_orig_single')}",
+                 f"scale-aligned {pair('absrel_single_aligned', 'absrel_orig_single_aligned')}",
+                 f"d<1.25 {pair('delta1_single', 'delta1_orig_single')}",
+                 f"overlap {pair('overlap_median', 'orig_overlap_median')}"]
         if "sky_median_m" in m:
             parts.append(f"sky {m['sky_median_m']:.0f} m")
         parts.append(f"kappa {m.get('kappa', float('nan')):.3f}")

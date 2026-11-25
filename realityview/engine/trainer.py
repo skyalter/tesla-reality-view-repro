@@ -111,8 +111,10 @@ def to_device(batch, device):
 
 
 def ignore_stop_signals(_worker_id: int) -> None:
-    """For data-loading processes: the training process decides when to stop, they just follow it."""
-    for sig in (signal.SIGUSR1, signal.SIGTERM, signal.SIGINT):
+    """For data-loading processes: the training process decides when to stop, they just follow it.
+    SIGTERM is left alone: it is how a data-loading process is ended when the training process fails, and a
+    process that ignored it would keep the failed run from exiting."""
+    for sig in (signal.SIGUSR1, signal.SIGINT):
         signal.signal(sig, signal.SIG_IGN)
 
 
@@ -310,13 +312,31 @@ class Trainer:
         if cfg["eval_at_start"] and self.step == 0:
             last_metrics = self.evaluate()
         iterator = iter(self.loader)
+        try:
+            stopped = self._loop(iterator, params)
+        finally:
+            del iterator        # stops the data-loading processes
+
+        self.checkpoint()
+        if stopped:
+            self.log(f"stopped early: checkpoint written at step {self.step}; run the same command to continue")
+        else:
+            last_metrics = self.evaluate()
+            if self.info.is_main:
+                (self.run_dir / "done.json").write_text(json.dumps({"step": self.step, **last_metrics}) + "\n")
+        self.sync(wait=True)
+        dist.cleanup(self.info)
+        return {"step": self.step, "finished": not stopped, **last_metrics}
+
+    def _loop(self, iterator, params) -> bool:
+        """Steps until total_steps or until a stop is asked for; returns whether it stopped early."""
+        cfg = self.cfg
+        total = cfg["total_steps"]
         data_time = step_time = 0.0
         counted = 0
-        stopped = False
         while self.step < total:
             if self.should_stop():
-                stopped = True
-                break
+                return True
             t0 = time.time()
             batch = to_device(next(iterator), self.device)
             t1 = time.time()
@@ -347,21 +367,10 @@ class Trainer:
                 self.log(f"step {self.step}/{total}  loss {record['loss']:.4f}  grad {record['grad_norm']:.2f}  "
                          f"{record['sec_per_step']:.2f} s/step (+{record['data_sec_per_step']:.2f} s waiting for data)")
             if cfg["eval_every"] and self.step % cfg["eval_every"] == 0 and self.step < total:
-                last_metrics = self.evaluate()
+                self.evaluate()
             if self.step % cfg["checkpoint_every"] == 0 and self.step < total:
                 self.checkpoint()
-        del iterator        # stops the data-loading processes
-
-        self.checkpoint()
-        if stopped:
-            self.log(f"stopped early: checkpoint written at step {self.step}; run the same command to continue")
-        else:
-            last_metrics = self.evaluate()
-            if self.info.is_main:
-                (self.run_dir / "done.json").write_text(json.dumps({"step": self.step, **last_metrics}) + "\n")
-        self.sync(wait=True)
-        dist.cleanup(self.info)
-        return {"step": self.step, "finished": not stopped, **last_metrics}
+        return False
 
     @staticmethod
     def headline(result: dict) -> dict:
