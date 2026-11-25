@@ -91,7 +91,7 @@ class LossTest(unittest.TestCase):
         self.assertAlmostEqual(float(D.lidar_depth_loss(pred, lidar, mask)), math.log(2.0) / 2, places=6)
         nothing = torch.zeros_like(mask)
         empty = D.lidar_depth_loss(pred.requires_grad_(), lidar, nothing)
-        self.assertEqual(float(empty), 0.0)
+        self.assertEqual(float(empty.detach()), 0.0)
         empty.backward()                               # still connected to the graph
 
     def test_confidence_weighting(self):
