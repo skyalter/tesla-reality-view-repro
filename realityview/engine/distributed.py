@@ -43,7 +43,11 @@ def setup(device: str = "auto", backend: str = "auto") -> ProcessInfo:
     else:
         device_obj = torch.device("cpu")
     if not torch_dist.is_initialized():
-        torch_dist.init_process_group(("nccl" if use_cuda else "gloo") if backend == "auto" else backend)
+        name = ("nccl" if use_cuda else "gloo") if backend == "auto" else backend
+        try:
+            torch_dist.init_process_group(name, device_id=device_obj if use_cuda else None)
+        except TypeError:           # PyTorch versions without the device_id argument
+            torch_dist.init_process_group(name)
     return ProcessInfo(rank, world, device_obj, True)
 
 

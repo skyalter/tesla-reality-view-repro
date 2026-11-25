@@ -32,7 +32,7 @@ def main() -> int:
     trainer.install_signal_handlers()
     result = trainer.fit()
     if trainer.info.is_main:
-        print("result: " + json.dumps(result), flush=True)
+        print("result: " + json.dumps(Trainer.headline(result)), flush=True)
     return 0
 
 

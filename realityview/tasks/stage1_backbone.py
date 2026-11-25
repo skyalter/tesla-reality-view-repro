@@ -207,6 +207,20 @@ class Stage1BackboneTask:
 
     # ------------------------------------------------------------------ evaluation
     @staticmethod
+    def summary(m: dict) -> str:
+        """One line for the console; everything else is in eval_log.jsonl."""
+        def pair(key, fmt="{:.4f}"):
+            text = fmt.format(m[key]) if key in m else "-"
+            return text + (f" (original {fmt.format(m['orig_' + key])})" if "orig_" + key in m else "")
+
+        parts = [f"AbsRel {pair('absrel_single')}", f"scale-aligned {pair('absrel_single_aligned')}",
+                 f"d<1.25 {pair('delta1_single')}", f"overlap {pair('overlap_median')}"]
+        if "sky_median_m" in m:
+            parts.append(f"sky {m['sky_median_m']:.0f} m")
+        parts.append(f"kappa {m.get('kappa', float('nan')):.3f}")
+        return "  |  ".join(parts) + f"  [{m.get('samples', 0):.0f} samples, LiDAR single sweep]"
+
+    @staticmethod
     def _eval_mask(depth, flag, ego, depth_range):
         return ((depth >= depth_range[0]) & (depth <= depth_range[1]) & ~ego
                 & ((flag.to(torch.int64) & D.SEE_THROUGH) == 0))

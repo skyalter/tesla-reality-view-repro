@@ -174,6 +174,13 @@ class TrainerTest(unittest.TestCase):
         self.assertTrue(run(self.path("resumed"))["finished"])
         self.assert_same_weights("straight", "resumed")
 
+    def test_stop_at_step_stops_once_and_the_same_command_continues(self):
+        run(self.path("straight"))
+        first = run(self.path("resumed"), stop_at_step=15)
+        self.assertEqual((first["finished"], first["step"]), (False, 15))
+        self.assertTrue(run(self.path("resumed"), stop_at_step=15)["finished"])
+        self.assert_same_weights("straight", "resumed")
+
     def test_a_time_limit_stops_the_run_with_a_checkpoint(self):
         result = run(self.path("limited"), max_minutes=1e-9)
         self.assertEqual((result["finished"], result["step"]), (False, 0))

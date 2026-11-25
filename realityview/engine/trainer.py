@@ -10,6 +10,7 @@ The loop knows nothing about the model. Everything specific comes from a task ob
         def param_groups(self, model) -> list[dict]                        # {"name", "params", "lr"} each
         def training_step(self, model, batch, step) -> (loss, {name: float})
         def evaluate(self, model, loader, device) -> {name: float}
+        def summary(self, metrics) -> str                                  # optional: one line for the console
         collate = None                                                     # optional collate function
         checkpoint_skip = ()                                               # optional: state-dict name prefixes that
                                                                            # are not saved (rebuilt by build_model)
@@ -22,8 +23,8 @@ Three things make an interrupted run continue exactly where an uninterrupted one
 The dataset has to play along: a sample must depend on its index only, not on what was read before it.
 
 A run stops early, with a checkpoint, when a file named STOP appears in the run directory, when
-`max_minutes` of wall-clock time are used up, or on SIGUSR1 / SIGTERM. Running the same command again
-continues it.
+`max_minutes` of wall-clock time are used up, when `stop_at_step` is reached, or on SIGUSR1 / SIGTERM.
+Running the same command again continues it.
 """
 from __future__ import annotations
 
@@ -35,6 +36,8 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+
+import warnings
 
 import numpy as np
 import torch
@@ -64,6 +67,8 @@ DEFAULTS = {
     "eval_batch_size": 1,
     "resume": "auto",           # "auto": continue from run_dir/last.pt if present; "none"; or a path
     "max_minutes": 0,           # stop with a checkpoint after this much wall-clock time; 0 = no limit
+    "stop_at_step": 0,          # stop with a checkpoint when this step is reached (a run that starts there
+                                # goes on); for trying out "interrupt and continue"
     "sync_command": "",         # shell command, run in the background after each checkpoint and once at the
                                 # end; it sees RUN_DIR and STEP in its environment
     "find_unused_parameters": False,
@@ -169,7 +174,11 @@ class Trainer:
                 if state.get(key, now) != now:
                     self.log(f"WARNING: {key} was {state[key]} when the checkpoint was written and is {now} now; "
                              "training continues, but not on the sample sequence of the earlier run")
+        self.start_step = self.step
         self.ddp_model = dist.wrap(self.model, self.info, cfg["find_unused_parameters"])
+        # PyTorch warns once per run when a 1x1 convolution's gradient has another memory layout than its
+        # parameter; it copies the gradient and goes on.
+        warnings.filterwarnings("ignore", message="Grad strides do not match bucket view strides")
 
         dataset = task.build_train_dataset()
         self.sampler = StepBatchSampler(len(dataset), cfg["batch_size"], self.info.rank, self.info.world_size,
@@ -206,6 +215,8 @@ class Trainer:
         if self.info.is_main:
             limit = self.cfg["max_minutes"]
             if limit and time.time() - self.started > limit * 60:
+                local = True
+            if self.cfg["stop_at_step"] and self.step == self.cfg["stop_at_step"] and self.step > self.start_step:
                 local = True
             stop_file = self.run_dir / "STOP"
             if stop_file.exists():
@@ -279,8 +290,11 @@ class Trainer:
             metrics = self.task.evaluate(self.model, loader, self.device)
         self.model.train(was_training)
         self.append_json("eval_log.jsonl", {"step": self.step, **metrics})
-        self.log(f"eval at step {self.step}: " + "  ".join(f"{k} {v:.4f}" for k, v in metrics.items()
-                                                           if isinstance(v, float) and "/" not in k))
+        if hasattr(self.task, "summary"):
+            text = self.task.summary(metrics)
+        else:
+            text = "  ".join(f"{k} {v:.4f}" for k, v in metrics.items() if isinstance(v, float) and "/" not in k)
+        self.log(f"eval at step {self.step}: {text}")
         return metrics
 
     # ------------------------------------------------------------------ main loop
@@ -348,3 +362,8 @@ class Trainer:
         self.sync(wait=True)
         dist.cleanup(self.info)
         return {"step": self.step, "finished": not stopped, **last_metrics}
+
+    @staticmethod
+    def headline(result: dict) -> dict:
+        """The entries of a result without the breakdowns (keys with a "/")."""
+        return {k: v for k, v in result.items() if "/" not in k}
