@@ -100,6 +100,76 @@ class TestFrontCenter(unittest.TestCase):
             front_center_view(img, K_FC, "nope", cfg)
 
 
+class TestFrontCenterViews(unittest.TestCase):
+    """The three ways of turning the stored 518x684 front-center image into 518x392 input."""
+
+    def setUp(self):
+        self.cfg = default_config()
+        self.Ks = scale_intrinsics(K_FC, (1550, 2048), (518, 684))
+
+    def views(self, mode):
+        from realityview.data.images import front_center_views
+
+        return front_center_views(mode, self.cfg)
+
+    def test_view_k_matches_image_geometry(self):
+        """Projecting with the view K equals projecting with the stored K and mapping the continuous
+        coordinate the way the view moves the pixels (row offset, rescale with pixel centres, padding)."""
+        pts = random_points()
+        u, v, _ = project(self.Ks, pts)
+        for mode, rows0, scale, pad in (("crop", [146], None, 0), ("split", [0, 292], None, 0),
+                                        ("letterbox", [0], (297 / 518, 392 / 684), 110)):
+            vs = self.views(mode)
+            self.assertEqual(len(vs), len(rows0))
+            for view, r0 in zip(vs, rows0):
+                Kv = view.K(self.Ks, 518)
+                uv, vv, _ = project(Kv, pts)
+                ue, ve = u, v - r0
+                if scale is not None:
+                    ue, ve = (ue + 0.5) * scale[0] - 0.5, (ve + 0.5) * scale[1] - 0.5
+                np.testing.assert_allclose(uv, ue + pad, atol=1e-9)
+                np.testing.assert_allclose(vv, ve, atol=1e-9)
+                self.assertEqual(view.out_wh, (518, 392))
+
+    def test_letterbox_content_where_k_says(self):
+        """A bright block in the stored image lands, after the letterbox resize and padding, where the view
+        K predicts; masks use nearest neighbour (stay binary) and padding is reported."""
+        view = self.views("letterbox")[0]
+        img = np.zeros((684, 518), np.float32)
+        img[300:316, 200:216] = 1.0  # centroid at pixel-centre coordinates (307.5, 207.5)
+        out = view.image(img)
+        self.assertEqual(out.shape, (392, 518))
+        yy, xx = np.mgrid[0:392, 0:518]
+        mu, mv = (out * xx).sum() / out.sum(), (out * yy).sum() / out.sum()
+        self.assertAlmostEqual(mu, (207.5 + 0.5) * 297 / 518 - 0.5 + 110, delta=0.02)
+        self.assertAlmostEqual(mv, (307.5 + 0.5) * 392 / 684 - 0.5, delta=0.02)
+        m = view.mask(img > 0.5)
+        self.assertEqual(m.dtype, bool)
+        pad = view.padding()
+        self.assertEqual(int(pad[0].sum()), 518 - 297)
+        self.assertTrue(pad[:, :110].all() and pad[:, 407:].all() and not pad[:, 110:407].any())
+        self.assertTrue(view.mask(np.zeros((684, 518), bool), pad_value=True)[:, :110].all())
+
+    def test_sparse_depth_follows_view(self):
+        """Sparse points move to the view pixel of their continuous position; nearest point kept."""
+        view = self.views("letterbox")[0]
+        vu = np.array([[300, 200], [301, 200], [600, 10]], np.uint16)
+        z = np.array([5.0, 4.0, 30.0], np.float16)
+        f = np.array([1, 2, 4], np.uint8)
+        out_vu, out_z, out_f = view.sparse(vu, z, f, 518)
+        # rows 300 and 301 map to the same view row (0.573 scale): the nearer point (4 m, flag 2) wins
+        self.assertEqual(len(out_z), 2)
+        r = int(np.floor((300 + 0.5) * 392 / 684 - 0.5 + 0.5))
+        c = int(np.floor((200 + 0.5) * 297 / 518 - 0.5 + 110 + 0.5))
+        i = [k for k in range(2) if tuple(out_vu[k]) == (r, c)]
+        self.assertEqual(len(i), 1)
+        self.assertEqual(float(out_z[i[0]]), 4.0)
+        self.assertEqual(int(out_f[i[0]]), 2)
+        crop = self.views("crop")[0]
+        out_vu, out_z, _ = crop.sparse(vu, z, f, 518)
+        self.assertEqual(out_vu.tolist(), [[154, 200], [155, 200]])  # row 600 is outside the crop
+
+
 class TestRealCalibration(unittest.TestCase):
     def test_all_cameras(self):
         from realityview.data.av2_io import read_calibration

@@ -7,10 +7,9 @@ import numpy as np
 import pandas as pd
 
 from realityview.data.av2_io import PoseTable
-from realityview.data.config import FLAG_CENTER_SWEEP, default_config
+from realityview.data.config import default_config
 from realityview.data.geometry import make_se3, quat_to_rotmat, rotmat_to_quat, se3_inv, transform_points
-from realityview.data.images import project
-from realityview.data.lidar_depth import SweepCache, depth_for_image, two_lidar_consistency
+from realityview.data.lidar_depth import SweepCache, two_lidar_consistency
 
 SPEED = 15.0  # m/s
 YAW_RATE = 0.3  # rad/s
@@ -51,8 +50,12 @@ class SyntheticLog:
         self.files = []
         rng = np.random.default_rng(1)
         for ts in self.sweep_ts:
-            # every world point is seen once by each lidar
-            ego = transform_points(se3_inv(self.poses.city_T_ego(int(ts))), np.concatenate([self.world, self.world]))
+            # each lidar samples the same surfaces at its own points (the down lidar sees the walls shifted
+            # along them by up to 5 cm, as two real scanners would)
+            jitter = np.zeros_like(self.world)
+            jitter[:, 0] = rng.uniform(-0.05, 0.05, len(self.world))
+            ego = transform_points(se3_inv(self.poses.city_T_ego(int(ts))),
+                                   np.concatenate([self.world, self.world + jitter]))
             n = len(ego)
             laser = np.where(np.arange(n) < len(self.world), 5, 40).astype(np.uint8)  # up, then down lidar
             # measurement times: the down lidar is ~50 ms out of phase with the up lidar
@@ -85,9 +88,11 @@ class TestPerSweepCompensation(unittest.TestCase):
         (up to the float16 storage step)."""
         for k in (0, 3, 7):
             city = self.cache.get(k)["city"]
-            self.assertLess(np.abs(city - np.concatenate([self.log.world, self.log.world])).max(), 0.04)
+            self.assertLess(np.abs(city[:len(self.log.world)] - self.log.world).max(), 0.04)
 
     def test_two_lidars_agree_at_camera_time(self):
+        """The consistency check (design check 5) passes on correctly compensated sweeps; the real-data
+        version is in test_lidar_depth.py, the pixel-exact transform test as well."""
         r = two_lidar_consistency(self.cache, 3, int(self.log.cam_ts))
         self.assertLessEqual(r["up_vs_down_median_m"], 0.15)
         self.assertLessEqual(r["sweep_vs_next_median_m"], 0.15)
@@ -103,48 +108,6 @@ class TestPerSweepCompensation(unittest.TestCase):
         up = sw["laser_number"].to_numpy() < 32
         d, _ = cKDTree(city[up]).query(city[~up])
         self.assertGreater(np.median(d), 0.15)
-
-    def test_depth_matches_world_projection(self):
-        """Every depth pixel equals the projection of a world point through the camera-time pose."""
-        K = np.array([[427.0, 0, 258.8], [0, 427.0, 195.9], [0, 0, 1]])
-        # a camera looking left (+y of the ego): columns are the camera x (right), y (down), z (forward) axes
-        R = np.array([[1.0, 0, 0], [0, 0, 1.0], [0, -1.0, 0]])
-        ego_T_cam = make_se3(R, [1.5, 0.2, 1.4])
-        cam_T_city = se3_inv(self.log.poses.city_T_ego(int(self.log.cam_ts)) @ ego_T_cam)
-        acc, single = depth_for_image(self.cache, int(self.log.cam_ts), 3, K, ego_T_cam, (392, 518), None, self.cfg)
-        self.assertGreater(len(acc), 500)
-        self.assertGreater(len(acc), len(single))
-        self.assertTrue(np.all((single.flag & FLAG_CENTER_SWEEP) > 0))
-        pc = transform_points(cam_T_city, self.log.world)
-        u, v, z = project(K, pc)
-        ok = z > 0.5
-        dense = np.full((392, 518), np.inf)
-        vi, ui = np.floor(v[ok] + 0.5).astype(int), np.floor(u[ok] + 0.5).astype(int)
-        inside = (vi >= 0) & (vi < 392) & (ui >= 0) & (ui < 518)
-        np.minimum.at(dense, (vi[inside], ui[inside]), z[ok][inside])
-        got = acc.z.astype(np.float64)
-        # float16 storage of xyz moves points by up to ~1 px here: compare with the 3x3 neighbourhood
-        pad = np.pad(dense, 1, constant_values=np.inf)
-        v, u = acc.vu[:, 0].astype(int) + 1, acc.vu[:, 1].astype(int) + 1
-        best = np.full(len(got), np.inf)
-        for dv in (-1, 0, 1):
-            for du in (-1, 0, 1):
-                e = pad[v + dv, u + du]
-                with np.errstate(invalid="ignore"):
-                    best = np.fmin(best, np.abs(got - e) / e)
-        self.assertGreater(np.mean(best < 0.01), 0.97)
-        self.assertLess(np.median(best), 0.002)
-
-
-class TestRealLidar(unittest.TestCase):
-    def test_two_lidars_real_log(self):
-        from realityview.data.checks import check_lidar_two_sensor
-        from realityview.data.pipeline import LogContext
-
-        path, _, _ = _util.real_log()
-        ctx = LogContext(path, default_config(), None)
-        r = check_lidar_two_sensor(ctx)
-        self.assertTrue(r["passed"], {k: v for k, v in r.items() if k != "per_sweep"})
 
 
 if __name__ == "__main__":

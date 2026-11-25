@@ -145,6 +145,67 @@ class TestStage1Synthetic(unittest.TestCase):
                 Stage1Dataset(root, "val", ["fake"], front_center_mode="other")
 
 
+class TestReferenceAndViews(unittest.TestCase):
+    def test_reference_is_front_center_at_t(self):
+        """With inputs that exclude t, poses and dt still refer to the front-center camera at t."""
+        with tempfile.TemporaryDirectory() as root:
+            build_fake_root(root)
+            base = Stage1Dataset(root, "val", ["fake"])
+            ds = Stage1Dataset(root, "val", ["fake"], input_offsets=(-10,))
+            # t must itself be complete: moment 3 is incomplete, so t = 3 is never a sample
+            self.assertNotIn(3, [i for _, i in ds.samples])
+            k = [n for n, (_, i) in enumerate(ds.samples) if i == 20][0]
+            kb = [n for n, (_, i) in enumerate(base.samples) if i == 20][0]
+            s, sb = ds[k], base[kb]
+            self.assertEqual(tuple(s["images"].shape), (7, 3, 392, 518))
+            # the t-10 slot of the default sample equals the only slot here
+            self.assertTrue(torch.allclose(s["ref_T_cam"], sb["ref_T_cam"][7:], atol=1e-5))
+            self.assertTrue(torch.allclose(s["dt"], sb["dt"][7:]))
+            self.assertAlmostEqual(float(s["dt"][0]), -0.5, places=6)
+
+    def test_front_center_views_in_sample(self):
+        with tempfile.TemporaryDirectory() as root:
+            build_fake_root(root)
+            Kfc = None
+            for mode, n_fc in (("crop", 1), ("split", 2), ("letterbox", 1)):
+                ds = Stage1Dataset(root, "val", ["fake"], front_center_mode=mode, with_box_masks=True)
+                s = ds[0]
+                Kfc = np.array(ds._log(0)["meta"]["K_stored"][FRONT_CENTER])
+                fc = (s["cam_id"] == 0) & (s["slot"] == 0)
+                self.assertEqual(int(fc.sum()), n_fc)
+                self.assertEqual(s["view"][fc].tolist(), list(range(n_fc)))
+                if mode == "split":
+                    self.assertAlmostEqual(float(s["K"][1, 1, 2]), Kfc[1, 2] - 292, places=3)
+                    # the ego mask (stored rows 600..683) appears in the lower view only
+                    self.assertFalse(s["ego_mask"][0].any())
+                    self.assertTrue(s["ego_mask"][1][600 - 292:].all())
+                if mode == "letterbox":
+                    self.assertTrue(s["ego_mask"][0][:, :110].all())  # padding is never supervised
+                    self.assertAlmostEqual(float(s["K"][0, 0, 2]), (Kfc[0, 2] + 0.5) * 297 / 518 - 0.5 + 110,
+                                           places=3)
+                    self.assertFalse(s["images"][0][:, :, :110].any())
+                # depth stays within range and on the ego mask's complement where the source was
+                pos = s["depth"][s["depth"] > 0]
+                self.assertTrue(((pos >= 0.49) & (pos <= 250.2)).all())
+
+    def test_missing_ego_masks_fail(self):
+        with tempfile.TemporaryDirectory() as root:
+            build_fake_root(root)
+            os.remove(os.path.join(root, "ego_masks", "ring_side_left.png"))
+            with self.assertRaises(FileNotFoundError):
+                Stage1Dataset(root, "val", ["fake"])
+
+    def test_overlapping_root_lists_fail(self):
+        with tempfile.TemporaryDirectory() as root:
+            build_fake_root(root)
+            os.makedirs(os.path.join(root, "splits"))
+            for name, ids in (("train.txt", ["a", "b"]), ("dev.txt", ["c"]), ("val.txt", ["b"])):
+                with open(os.path.join(root, "splits", name), "w") as f:
+                    f.write("\n".join(ids) + "\n")
+            with self.assertRaises(ValueError):
+                Stage1Dataset(root, "val", ["fake"])
+
+
 class TestStage1Real(unittest.TestCase):
     def test_real(self):
         root = _util.processed_root()

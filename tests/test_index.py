@@ -69,6 +69,33 @@ class TestIndex(unittest.TestCase):
             build_moments_table(cam_ts, poses, sweep_ts, default_config())
 
 
+class TestTimestampCheck(unittest.TestCase):
+    def ctx(self, cam_ts, sweep_ts, poses):
+        class Ctx:
+            pass
+
+        c = Ctx()
+        c.cam_ts, c.sweep_ts, c.poses = cam_ts, sweep_ts, poses
+        return c
+
+    def test_edges_allowed_interior_not(self):
+        from realityview.data.checks import check_timestamps
+
+        cfg = default_config()
+        n = 320
+        cam_ts, sweep_ts, poses = synthetic(n=n)  # first side-left frame missing: moment 0 incomplete
+        m = build_moments_table(cam_ts, poses, sweep_ts, cfg)
+        r = check_timestamps(self.ctx(cam_ts, sweep_ts, poses), m)
+        self.assertTrue(r["passed"], r)
+        self.assertEqual(r["n_incomplete"], 1)
+        # a side-left frame missing in the middle of the log: the nearest one is 27.5 ms away -> fails
+        cam_ts["ring_side_left"] = np.delete(cam_ts["ring_side_left"], 150)
+        m = build_moments_table(cam_ts, poses, sweep_ts, cfg)
+        r = check_timestamps(self.ctx(cam_ts, sweep_ts, poses), m)
+        self.assertFalse(r["passed"])
+        self.assertGreaterEqual(r["n_incomplete_interior"], 1)
+
+
 class TestRealIndex(unittest.TestCase):
     def test_real_log(self):
         from realityview.data import av2_io
