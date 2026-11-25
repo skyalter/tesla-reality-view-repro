@@ -25,7 +25,6 @@ import json  # noqa: E402
 import multiprocessing as mp  # noqa: E402
 import sys  # noqa: E402
 import time  # noqa: E402
-import traceback  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
@@ -35,8 +34,7 @@ import cv2  # noqa: E402
 
 from realityview.data.config import CAMS, default_config, init_root_config  # noqa: E402
 from realityview.data.images import ego_masks_for_log  # noqa: E402
-from realityview.data.pipeline import (IncompleteLogError, _worker_init, code_commit, is_done,  # noqa: E402
-                                       process_log)
+from realityview.data.pipeline import _worker_init, code_commit, is_done, process_log_safe  # noqa: E402
 from realityview.data.splits import read_list, write_split_files  # noqa: E402
 
 
@@ -51,7 +49,10 @@ def parse_args():
                    help="log list file (one id per line, or a TSV with log_id) or comma-separated ids; "
                         "default: every log directory under <raw-root>/<split>")
     p.add_argument("--first", type=int, default=None, help="only the first N logs of the list")
-    p.add_argument("--workers", type=int, default=1, help="processes for images and depth (spawned)")
+    p.add_argument("--workers", type=int, default=1, help="worker processes (spawned, never forked)")
+    p.add_argument("--parallel", choices=["auto", "logs", "images"], default="auto",
+                   help="what the workers share: whole logs (one log per process) or the images of one log at a "
+                        "time; auto = logs when there are at least as many logs to do as workers")
     p.add_argument("--ego-mask-dir", default=os.path.join(REPO, "assets", "ego_masks", "argoverse2"))
     p.add_argument("--redo", action="store_true", help="reprocess logs that already have DONE")
     return p.parse_args()
@@ -92,48 +93,64 @@ def main():
             cv2.imwrite(f, m.astype("uint8") * 255)
 
     logs = resolve_logs(args)
-    pool = None
-    if args.workers > 1:
-        pool = mp.get_context("spawn").Pool(args.workers, initializer=_worker_init)
-    else:
-        _worker_init()
+    os.makedirs(os.path.join(args.out_root, "logs", args.split), exist_ok=True)
+    todo = []
     results = []
+    for log_id in dict.fromkeys(logs):  # each log once, in list order
+        if not args.redo and is_done(args.out_root, args.split, log_id, cfg):
+            print(f"{args.split}/{log_id}: already done, skipped", flush=True)
+            results.append({"log_id": log_id, "split": args.split, "status": "skipped_done"})
+        else:
+            todo.append(log_id)
+    mode = args.parallel
+    if mode == "auto":
+        mode = "logs" if args.workers > 1 and len(todo) >= args.workers else "images"
+    started = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     t_run = time.perf_counter()
-    try:
-        for n, log_id in enumerate(logs, 1):
-            tag = f"[{n}/{len(logs)}] {args.split}/{log_id}"
-            if not args.redo and is_done(args.out_root, args.split, log_id, cfg):
-                print(f"{tag}: already done, skipped", flush=True)
-                results.append({"log_id": log_id, "split": args.split, "status": "skipped_done"})
-                continue
-            try:
-                r = process_log(args.raw_root, args.split, log_id, args.out_root, cfg, args.ego_mask_dir,
-                                pool=pool, n_workers=args.workers, commit=commit)
-                ck = "checks passed" if r["checks_passed"] else f"CHECKS FAILED: {', '.join(r['failed_checks'])}"
-                print(f"{tag}: done in {r['timings_s']['total_s']:.1f} s, {r['bytes']['total'] / 2**20:.0f} MiB, {ck}",
-                      flush=True)
-            except IncompleteLogError as e:
-                r = {"log_id": log_id, "split": args.split, "status": "incomplete", "error": str(e)}
-                print(f"{tag}: INCOMPLETE, skipped: {e}", flush=True)
-            except Exception as e:  # keep going with the other logs, but report
-                r = {"log_id": log_id, "split": args.split, "status": "error", "error": repr(e),
-                     "traceback": traceback.format_exc()}
-                print(f"{tag}: ERROR: {e!r}", flush=True)
-            results.append(r)
-    finally:
-        if pool is not None:
-            pool.close()
-            pool.join()
+
+    def report(n, r):
+        tag = f"[{n}/{len(todo)}] {args.split}/{r['log_id']}"
+        if r["status"] == "done":
+            ck = "checks passed" if r["checks_passed"] else f"CHECKS FAILED: {', '.join(r['failed_checks'])}"
+            print(f"{tag}: done in {r['timings_s']['total_s']:.1f} s, {r['bytes']['total'] / 2**20:.0f} MiB, {ck}",
+                  flush=True)
+        elif r["status"] == "incomplete":
+            print(f"{tag}: INCOMPLETE, skipped: {r['error']}", flush=True)
+        else:
+            print(f"{tag}: ERROR: {r['error']}", flush=True)
+        results.append(r)
+
+    # spawn, never fork: forking a process that has already used some libraries (e.g. polars, OpenMP) can
+    # deadlock the children
+    ctx = mp.get_context("spawn")
+    if args.workers > 1 and mode == "logs":
+        # whole logs in parallel, one process each (no per-log serial parts, no sweep re-reading)
+        tasks = [(args.raw_root, args.split, log_id, args.out_root, cfg, args.ego_mask_dir, None, 1, commit)
+                 for log_id in todo]
+        with ctx.Pool(args.workers, initializer=_worker_init, maxtasksperchild=4) as pool:
+            for n, r in enumerate(pool.imap_unordered(process_log_safe, tasks), 1):
+                report(n, r)
+    else:
+        pool = ctx.Pool(args.workers, initializer=_worker_init) if args.workers > 1 else None
+        if pool is None:
+            _worker_init()
+        try:
+            for n, log_id in enumerate(todo, 1):
+                report(n, process_log_safe((args.raw_root, args.split, log_id, args.out_root, cfg,
+                                            args.ego_mask_dir, pool, args.workers, commit)))
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
 
     summary = {k: sum(1 for r in results if r["status"] == k) for k in ("done", "skipped_done", "incomplete", "error")}
     summary["checks_failed"] = sum(1 for r in results if r["status"] == "done" and not r["checks_passed"])
-    report = {"started_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "split": args.split,
-              "workers": args.workers, "commit": commit, "wall_s": time.perf_counter() - t_run,
-              "summary": summary, "logs": results}
+    run = {"started_utc": started, "split": args.split, "workers": args.workers, "parallel": mode,
+           "commit": commit, "wall_s": time.perf_counter() - t_run, "summary": summary, "logs": results}
     os.makedirs(os.path.join(args.out_root, "runs"), exist_ok=True)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     with open(os.path.join(args.out_root, "runs", f"preprocess_{args.split}_{stamp}.json"), "w") as f:
-        json.dump(report, f, indent=1)
+        json.dump(run, f, indent=1)
     print(json.dumps(summary))
     bad = summary["incomplete"] + summary["error"] + summary["checks_failed"]
     sys.exit(1 if bad else 0)

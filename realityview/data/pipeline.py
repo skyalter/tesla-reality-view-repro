@@ -12,6 +12,7 @@ import platform
 import shutil
 import subprocess
 import time
+import traceback
 
 import cv2
 import numpy as np
@@ -265,3 +266,18 @@ def is_done(out_root: str, split: str, log_id: str, cfg: dict) -> bool:
             return json.load(fh).get("config_sha256") == config_sha256(cfg)
     except Exception:
         return False
+
+
+def process_log_safe(task) -> dict:
+    """``process_log`` for one log that never raises: returns a result dict with ``status`` "done",
+    "incomplete" or "error". ``task`` = (raw_root, split, log_id, out_root, cfg, ego_mask_dir, pool,
+    n_workers, commit); used directly, or as the worker task when whole logs run in parallel (pool None)."""
+    raw_root, split, log_id, out_root, cfg, ego_mask_dir, pool, n_workers, commit = task
+    try:
+        return process_log(raw_root, split, log_id, out_root, cfg, ego_mask_dir, pool=pool, n_workers=n_workers,
+                           commit=commit)
+    except IncompleteLogError as e:
+        return {"log_id": log_id, "split": split, "status": "incomplete", "error": str(e)}
+    except Exception as e:  # keep going with the other logs, but report
+        return {"log_id": log_id, "split": split, "status": "error", "error": repr(e),
+                "traceback": traceback.format_exc()}
