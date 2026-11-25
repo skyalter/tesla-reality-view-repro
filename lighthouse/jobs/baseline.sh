@@ -7,7 +7,7 @@
 OUT="$RV_RUNS/$RV_RUN_NAME"
 mkdir -p "$OUT"
 status=0
-for scale in ${RV_POSE_SCALES:-20 10 6.7}; do
+for scale in ${RV_POSE_SCALES:-20 14 10 6.7}; do
   echo "+ pose scale $scale"
   python scripts/eval_depth.py --config "configs/$RV_CONFIG.yaml" --workers "${SLURM_CPUS_PER_TASK:-8}" \
     --out "$OUT/original_pose_scale_$scale.json" \
