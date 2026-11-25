@@ -254,7 +254,9 @@ class Stage1BackboneTask:
         Names: `single` is the single-sweep LiDAR layer (the cleaner one), `acc` the accumulated layer;
         `aligned` means the prediction of every sample was first scaled by the median of LiDAR / prediction;
         `orig` is the frozen original network on the same inputs; `standing` / `moving` split the samples by
-        the ego displacement within +-1 s. Keys with a "/" are the breakdowns by distance and by camera."""
+        the ego displacement within +-1 s; `scale` is the median of LiDAR / prediction (per sample, then the
+        geometric mean over the samples; `scale_log_std` its spread). Keys with a "/" are the breakdowns by
+        distance and by camera."""
         from ..data.config import CAMS
         from ..engine.trainer import to_device
 
@@ -315,7 +317,7 @@ class Stage1BackboneTask:
             if counts.get(prefix + "scale_log"):
                 n = counts[prefix + "scale_log"]
                 mean = sums[prefix + "scale_log"] / n
-                result[prefix + "scale_median_like"] = math.exp(mean)        # geometric mean of the per-sample factors
+                result[prefix + "scale"] = math.exp(mean)      # LiDAR / prediction: geometric mean over the samples
                 result[prefix + "scale_log_std"] = math.sqrt(max(sums[prefix + "scale_log_sq"] / n - mean ** 2, 0.0))
         if "loss_anchor" in result:      # how far the depth has moved from the original where there is no LiDAR
             result["drift_from_original"] = result["loss_anchor"]
