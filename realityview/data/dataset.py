@@ -41,6 +41,7 @@ from torch.utils.data import Dataset
 from .config import CAMS, FRONT_CENTER, load_root_config
 from .geometry import se3_from_quat_trans, se3_inv
 from .images import FRONT_CENTER_MODES, front_center_views, stored_size
+from .splits import check_root_splits
 from .store import LogStore, find_log, img_relpath
 
 
@@ -94,6 +95,7 @@ class Stage1Dataset(Dataset):
         self.load_single = load_single_layer
         self.with_box_masks = with_box_masks
         self.cfg = load_root_config(processed_root)
+        self.split_lists = check_root_splits(processed_root)  # raises if train / dev / val overlap
         self.fc_views = front_center_views(front_center_mode, self.cfg)
         self.ego = load_root_ego_masks(processed_root, self.cfg)
         # (camera, view) per slot, in output order

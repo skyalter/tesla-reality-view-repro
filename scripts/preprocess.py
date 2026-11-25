@@ -37,7 +37,7 @@ from realityview.data.config import CAMS, default_config, init_root_config  # no
 from realityview.data.images import ego_masks_for_log  # noqa: E402
 from realityview.data.pipeline import (IncompleteLogError, _worker_init, code_commit, is_done,  # noqa: E402
                                        process_log)
-from realityview.data.splits import read_list  # noqa: E402
+from realityview.data.splits import read_list, write_split_files  # noqa: E402
 
 
 def parse_args():
@@ -74,6 +74,7 @@ def main():
         sys.exit("--raw-root and --out-root (or AV2_RAW_ROOT / RV_PROCESSED_ROOT) are required")
     cfg = default_config()
     init_root_config(args.out_root, cfg)
+    write_split_files(args.out_root, REPO)  # splits/: train, dev, val, overfit; checks they are disjoint
     commit = code_commit(REPO)
     with open(os.path.join(args.out_root, "CODE_COMMIT.txt"), "a") as f:
         f.write(f"{dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')} {commit}\n")

@@ -38,7 +38,7 @@ import numpy as np  # noqa: E402
 
 from realityview.data.checks import overlay_mosaic  # noqa: E402
 from realityview.data.config import CAMS, default_config, load_root_config  # noqa: E402
-from realityview.data.splits import default_lists, overlaps, read_list  # noqa: E402
+from realityview.data.splits import check_root_splits, default_lists, overlaps, read_list, val_fixed_moments  # noqa: E402,E501
 from realityview.data.store import LogStore, find_log  # noqa: E402
 
 
@@ -48,6 +48,7 @@ def parse_args():
     p.add_argument("--split", required=True)
     p.add_argument("--logs", default=None, help="list file or comma-separated ids; default: all processed logs")
     p.add_argument("--overlays", action="store_true")
+    p.add_argument("--overlay-dir", default=None, help="where overlays go (default <out-root>/overlays/<split>)")
     p.add_argument("--moment", type=int, default=None, help="front-center frame for overlays (default: middle)")
     p.add_argument("--read-samples", type=int, default=0)
     p.add_argument("--repro", default=None, help="log id to process twice and compare")
@@ -88,7 +89,7 @@ def draw_overlays(args, cfg, log_id, store):
         v = moments.index[moments["valid_stage2"]]
         i = int(v[len(v) // 2])
     m = moments.iloc[i]
-    od = os.path.join(args.out_root, "overlays", args.split)
+    od = args.overlay_dir or os.path.join(args.out_root, "overlays", args.split)
     os.makedirs(od, exist_ok=True)
     em = ego_masks(args.out_root, cfg)
     paths = []
@@ -188,9 +189,30 @@ def main():
                 print(traceback.format_exc())
     lists = default_lists(REPO)
     ov = overlaps(lists)
-    out["global"]["split_lists_disjoint"] = {"passed": not ov, "sizes": {k: len(v) for k, v in lists.items()},
-                                             "overlaps": ov}
-    print("split lists disjoint:", not ov)
+    try:
+        root_lists = check_root_splits(args.out_root)
+        root_ok, root_err = True, None
+    except ValueError as e:
+        root_lists, root_ok, root_err = {}, False, str(e)
+    out["global"]["split_lists_disjoint"] = {"passed": not ov and root_ok,
+                                             "sizes": {k: len(v) for k, v in lists.items()}, "overlaps": ov,
+                                             "root_splits": {k: len(v) for k, v in root_lists.items()},
+                                             "root_splits_error": root_err}
+    print("split lists disjoint:", not ov and root_ok)
+    if args.split == "val":
+        rows = []
+        for log_id in logs:
+            path = find_log(args.out_root, args.split, log_id)
+            if path is None:
+                continue
+            mom = LogStore(path).parquet("moments.parquet")
+            for k, i in enumerate(val_fixed_moments(len(mom))):
+                rows.append(f"{log_id}\t{k}\t{i}\t{bool(mom['valid_stage2'].iloc[i])}\n")
+        os.makedirs(os.path.join(args.out_root, "splits"), exist_ok=True)
+        with open(os.path.join(args.out_root, "splits", "val_fixed.tsv"), "w") as f:
+            f.write("log_id\tk\tmoment\tvalid_stage2\n" + "".join(rows))
+        out["global"]["val_fixed"] = {"passed": all(r.rstrip().endswith("True") for r in rows),
+                                      "n_samples": len(rows)}
     if args.read_samples:
         r = read_samples(args, logs, args.read_samples)
         out["global"]["read_samples"] = r
