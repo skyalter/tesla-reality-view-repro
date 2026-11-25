@@ -46,7 +46,7 @@ def setting():
     return {
         "task": "stage1_backbone", "seed": 5, "total_steps": STEPS, "num_workers": 2, "deterministic": True,
         "schedule": {"warmup_steps": 2, "min_lr": 1.0e-6}, "log_every": 1, "checkpoint_every": 100, "eval_every": 0,
-        "model": {"name": "da3-base", "weights_root": weights},
+        "model": {"name": "da3-base", "weights_root": weights, "grad_checkpoint": True},   # less GPU memory
         "data": {"root": root, "train_split": split, "train_logs": [log_id], "train_first": None,
                  "eval_split": split, "eval_logs": [log_id], "eval_first": None, "eval_per_log": 2},
     }
@@ -90,7 +90,8 @@ class TestStage1Training(unittest.TestCase):
             flat = {"seed": cfg["seed"], "total_steps": STEPS, "num_workers": 2, "deterministic": True,
                     "schedule.warmup_steps": 2, "log_every": 1, "checkpoint_every": 100, "eval_every": 0,
                     "eval_at_start": False, "keep_every": 0,
-                    "model.weights_root": cfg["model"]["weights_root"], **{f"data.{k}": v for k, v in cfg["data"].items()}}
+                    "model.weights_root": cfg["model"]["weights_root"], "model.grad_checkpoint": True,
+                    **{f"data.{k}": v for k, v in cfg["data"].items()}}
             command += [f"{k}={json.dumps(v)}" for k, v in flat.items()]
             done = subprocess.run(command, capture_output=True, text=True, timeout=900,
                                   env=dict(os.environ, PYTHONNOUSERSITE="1"))
