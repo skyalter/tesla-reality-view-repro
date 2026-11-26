@@ -15,13 +15,15 @@ Output, per log in <out>/<split>/<log id>/:
     rgb/<ts>.jpg      chase image (ts = timestamp of the front-center image at t, ns)
     conf/<ts>.png     confidence alpha x V x D, x 255 (0 on the ego vehicle)
     alpha/ vis/ dcons/ mover/<ts>.png   the factors and the moving-object share, x 255
-    ego_mask.png      where the ego vehicle is (fixed camera: one per log)
+    ego_mask.png      where the ego vehicle is (fixed camera: one per log); the confidence is 0 there
+    ego_overlay.png   the ego vehicle as an RGBA image to lay over the chase images for display (--ego-model)
     frames.tsv        one line per frame; camera.json   camera and provenance; DONE   when the log is complete
 Logs with DONE are skipped.
 
 Debugging without a head checkpoint: ``--untrained --model-name da3-base [--backbone-checkpoint <last.pt>]``
 uses an untrained appearance branch with every opacity set to ``--opacity``.
-``--preview`` renders a few moments of the first log from several candidate cameras into one comparison image.
+``--preview`` renders a few moments of the first log from several candidate cameras into one comparison image
+and a table (holes and confidence per camera).
 """
 from __future__ import annotations
 
@@ -39,7 +41,7 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-DEFAULT_CANDIDATES = "7,4,12,70;10.5,5.6,16,80;9,5,15,90"
+DEFAULT_CANDIDATES = "7,4,12,70;9,5,15,90;10.5,5.6,16,80;10,6,14,80;10,6,14,90"
 
 
 def parse_args(argv=None):
@@ -62,6 +64,15 @@ def parse_args(argv=None):
                    help="Gaussians closer than this to the chase camera (metres along its optical axis) are not "
                         "drawn: the virtual camera would otherwise sit inside tree crowns and other things "
                         "above the road. The ego vehicle and the road are further away than this.")
+    p.add_argument("--ego-model", default="sedan",
+                   help="the car laid over the chase images for display: 'sedan' (built in, no file), the path of "
+                        "a Wavefront OBJ, or 'none'")
+    p.add_argument("--ego-model-axes", nargs=2, default=("+x", "+z"), metavar=("FORWARD", "UP"),
+                   help="with an OBJ: the axes of the file that point to the front and the top of the car")
+    p.add_argument("--ego-mask", default="box", choices=("box", "model"),
+                   help="the area without supervision (confidence 0): the projected box around the vehicle, or "
+                        "the outline of --ego-model grown by --ego-mask-grow pixels")
+    p.add_argument("--ego-mask-grow", type=int, default=4)
     p.add_argument("--context", type=int, nargs="+", default=(-40, -20, 0, 20, 40),
                    help="moments merged into one target, front-center frames relative to t (20 Hz)")
     p.add_argument("--stride", type=int, default=1, help="render every n-th moment")
@@ -84,6 +95,8 @@ def parse_args(argv=None):
         p.error("--checkpoint is required (or --untrained for debugging)")
     if 0 not in args.context:
         p.error("--context must contain 0")
+    if args.ego_mask == "model" and args.ego_model == "none":
+        p.error("--ego-mask model needs --ego-model")
     return args
 
 
@@ -180,6 +193,24 @@ def merged(t, context, cache, device):
     return merge_moments(parts)
 
 
+def ego_layers(args, ref_T_ego, ref_T_cam, K, H, W):
+    """(ego mask (H, W) bool on the device of K, overlay (H, W, 4) float RGBA in RGB order or None)."""
+    from realityview.render.ego_overlay import load_obj, place_mesh, render_mesh, sedan_mesh
+    from realityview.render.targets import ego_box_mask, overlay_mask
+
+    overlay = None
+    mask = ego_box_mask(ref_T_ego, ref_T_cam, K, H, W)
+    if args.ego_model != "none":
+        mesh = sedan_mesh() if args.ego_model == "sedan" else place_mesh(load_obj(args.ego_model),
+                                                                         *args.ego_model_axes)
+        ego_T_cam = (torch.linalg.inv(ref_T_ego.double()) @ ref_T_cam.double()).cpu().numpy()
+        overlay = render_mesh(mesh, ego_T_cam, K.double().cpu().numpy(), H, W)
+        if args.ego_mask == "model":
+            body = render_mesh(mesh, ego_T_cam, K.double().cpu().numpy(), H, W, shadow=0.0, supersample=2)
+            mask = overlay_mask(body, args.ego_mask_grow).to(K.device)
+    return mask, overlay
+
+
 def to_u8(x: torch.Tensor) -> np.ndarray:
     return (x.clamp(0, 1) * 255.0).round().byte().cpu().numpy()
 
@@ -193,7 +224,8 @@ def rgb_u8(rgb: torch.Tensor) -> np.ndarray:
 def render_log(model, task, ds, log_index, args, info):
     from realityview.engine.checkpoint import code_version
     from realityview.render.camera import chase_camera
-    from realityview.render.targets import EGO_BOX, ego_box_mask, render_chase
+    from realityview.render.ego_overlay import save_overlay
+    from realityview.render.targets import EGO_BOX, render_chase
 
     log_id = ds.logs[log_index][0]
     folder = os.path.join(args.out, args.split, log_id)
@@ -217,13 +249,17 @@ def render_log(model, task, ds, log_index, args, info):
         ref_T_ego = cache[t]["ref_T_ego"].to(dev)
         ref_T_cam, K = chase_camera(ref_T_ego, args.back, args.up, args.pitch, args.hfov, W, H)
         if ego_mask is None:
-            ego_mask = ego_box_mask(ref_T_ego, ref_T_cam, K, H, W)
+            ego_mask, overlay = ego_layers(args, ref_T_ego, ref_T_cam, K, H, W)
             cv2.imwrite(os.path.join(folder, "ego_mask.png"), ego_mask.byte().cpu().numpy() * 255)
+            if overlay is not None:
+                save_overlay(os.path.join(folder, "ego_overlay.png"), overlay)
             ego_T_cam = torch.linalg.inv(ref_T_ego) @ ref_T_cam
             camera = {"back_m": args.back, "up_m": args.up, "pitch_down_deg": args.pitch, "hfov_deg": args.hfov,
                       "width": W, "height": H, "K": K.cpu().tolist(), "K_convention": "integer pixel centres",
                       "ego_T_cam": ego_T_cam.cpu().tolist(), "camera_axes": "OpenCV (x right, y down, z forward)",
-                      "ego_box": EGO_BOX, "context_frames": list(args.context), "stride": args.stride,
+                      "ego_box": EGO_BOX, "ego_mask": args.ego_mask, "ego_mask_grow_px": args.ego_mask_grow,
+                      "ego_model": args.ego_model if args.ego_model in ("sedan", "none")
+                      else os.path.basename(args.ego_model), "context_frames": list(args.context), "stride": args.stride,
                       "tolerance": args.tolerance, "mode": args.mode, "near_m": args.near, "model": info,
                       "code_version": code_version()}
             with open(os.path.join(folder, "camera.json"), "w") as f:
@@ -255,9 +291,11 @@ def render_log(model, task, ds, log_index, args, info):
 
 
 def preview(model, task, ds, args):
-    """One image: a row per candidate camera, a column per moment, for the first log."""
+    """One image: a row per candidate camera, a column per moment, for the first log; and a table with, per
+    camera, the share of pixels outside the ego mask with opacity > 0.5 and their mean confidence."""
     from realityview.render.camera import chase_camera
-    from realityview.render.targets import ego_box_mask, render_chase
+    from realityview.render.ego_overlay import composite
+    from realityview.render.targets import render_chase
 
     cams = [tuple(float(x) for x in c.split(",")) for c in args.candidates.split(";") if c.strip()]
     log_id = ds.logs[0][0]
@@ -267,6 +305,8 @@ def preview(model, task, ds, args):
     W, H = args.size
     tw, th = W // 2, H // 2
     tiles = {}
+    layers = {}
+    stats = {r: [] for r in range(len(cams))}
     for t, context, cache in scenes(model, task, ds, 0, picks, args):
         g, n_obs, _ = merged(t, context, cache, args.device)
         ref_T_ego = cache[t]["ref_T_ego"].to(args.device)
@@ -275,12 +315,19 @@ def preview(model, task, ds, args):
             out = render_chase(g, n_obs, ref_T_cam, K, H, W, background=cache[t]["background"].to(args.device),
                                mode=args.mode, near=args.near)
             image = rgb_u8(out["rgb"])
-            edge = cv2.morphologyEx(ego_box_mask(ref_T_ego, ref_T_cam, K, H, W).byte().cpu().numpy(),
-                                    cv2.MORPH_GRADIENT, np.ones((5, 5), np.uint8)) > 0
-            image[edge] = (0, 255, 255)                     # outline of the ego box
-            conf = out["confidence"]
-            tiles[(r, t)] = (cv2.resize(image, (tw, th), interpolation=cv2.INTER_AREA),
-                             float((conf > 0.5).float().mean()))
+            if r not in layers:                             # the camera is fixed in the ego frame
+                layers[r] = ego_layers(args, ref_T_ego, ref_T_cam, K, H, W)
+            ego_mask, overlay = layers[r]
+            if overlay is not None:
+                image = composite(image, np.concatenate([overlay[..., 2::-1], overlay[..., 3:]], -1))
+            edge = cv2.morphologyEx(ego_mask.byte().cpu().numpy(), cv2.MORPH_GRADIENT,
+                                    np.ones((5, 5), np.uint8)) > 0
+            image[edge] = (0, 255, 255)                     # outline of the ego mask
+            outside = ~ego_mask
+            conf = out["confidence"][outside]
+            stats[r].append((float((out["alpha"][outside] > 0.5).float().mean()), float(conf.mean()),
+                             float((conf > 0.5).float().mean())))
+            tiles[(r, t)] = (cv2.resize(image, (tw, th), interpolation=cv2.INTER_AREA), stats[r][-1][2])
         print(f"preview moment {t}: {len(g) / 1e6:.2f} M Gaussians", flush=True)
         del g, n_obs
     grid = np.zeros((len(cams) * th, len(picks) * tw, 3), np.uint8)
@@ -298,7 +345,13 @@ def preview(model, task, ds, args):
     os.makedirs(args.out, exist_ok=True)
     path = os.path.join(args.out, f"preview_{args.split}_{log_id}.jpg")
     cv2.imwrite(path, grid, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    print(f"preview: {path}", flush=True)
+    table = os.path.join(args.out, f"preview_{args.split}_{log_id}.tsv")
+    with open(table, "w") as f:
+        f.write("back_m\tup_m\tpitch_down_deg\thfov_deg\talpha_gt_0.5\tmean_conf\tconf_gt_0.5\n")
+        for r, cam in enumerate(cams):
+            mean = np.mean(np.asarray(stats[r]), axis=0)
+            f.write("\t".join(f"{x:g}" for x in cam) + "\t" + "\t".join(f"{x:.4f}" for x in mean) + "\n")
+    print(f"preview: {path} and {table}", flush=True)
 
 
 def main(argv=None) -> int:

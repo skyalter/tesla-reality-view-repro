@@ -111,6 +111,30 @@ def ego_box_mask(ref_T_ego: torch.Tensor, ref_T_cam: torch.Tensor, K: torch.Tens
     return torch.from_numpy(mask > 0).to(K.device)
 
 
+def overlay_mask(overlay, grow_px: int = 4) -> torch.Tensor:
+    """Where a rendered car is: the pixels of an RGBA overlay ((H, W, 4) numpy, ``ego_overlay.render_mesh``)
+    with any opacity, grown by ``grow_px`` pixels. (H, W) bool."""
+    mask = (np.asarray(overlay)[..., 3] > 0).astype(np.uint8)
+    if grow_px > 0:
+        mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * grow_px + 1, 2 * grow_px + 1)))
+    return torch.from_numpy(mask > 0)
+
+
+def soft_confidence(alpha: torch.Tensor, visibility: torch.Tensor, depth_consistency: torch.Tensor,
+                    alpha_min: float = 0.5) -> torch.Tensor:
+    """A weight for the stage-2 loss from the three stored factors:
+
+        alpha * (0.5 + 0.5 * min(1, 2 V)) * sqrt(D),   0 where alpha < ``alpha_min``
+
+    Compared with the plain product alpha * V * D: one confirming view is enough for full visibility (most
+    surfaces are seen by one camera at two input moments only, so E[n_obs] is 1 and V = 0.5 for about half of
+    the pixels), no confirmation halves the weight instead of zeroing it, and the depth term is as with a 10 %
+    tolerance. Inputs are the factors as ``render_chase`` returns them (or the stored images / 255)."""
+    v1 = (2.0 * visibility).clamp(max=1.0)
+    conf = alpha * (0.5 + 0.5 * v1) * depth_consistency.clamp(min=0.0).sqrt()
+    return torch.where(alpha >= alpha_min, conf, torch.zeros_like(conf))
+
+
 @torch.no_grad()
 def render_chase(g: Gaussians, n_obs: torch.Tensor, ref_T_cam: torch.Tensor, K: torch.Tensor, height: int,
                  width: int, background: torch.Tensor | None = None, mode: str = "antialiased", *,
