@@ -264,19 +264,20 @@ class GlbFiles(unittest.TestCase):
 
 
 class ModelInTheRepository(unittest.TestCase):
-    PATH = os.path.join(_util.REPO, "assets", "ego_models", "tesla_m3_wintrez",
-                        "3a602469d7874d1397efa67182198705.glb")
+    PATH = os.path.join(_util.REPO, "assets", "ego_models", "tesla_my_2025_bloxbloger", "2025_tesla_model_y.glb")
 
     def test_size_place_and_outline(self):
         if not os.path.isfile(self.PATH):
             self.skipTest("the car model is not in this checkout")
-        mesh = place_mesh(load_glb(self.PATH, colors={"carpaint": (0.86, 0.87, 0.89)}), "+z", "+y",
-                          length=4.694, rear_overhang=0.98)
-        self.assertEqual(len(mesh.faces), 247356)
+        whole = load_glb(self.PATH)
+        self.assertEqual(len(whole.faces), 307356)
+        mesh = place_mesh(load_glb(self.PATH, colors={"Material_2125765635": (0.42, 0.50, 0.60)},
+                                   skip=("glass_headlight222",)), "+z", "+y", length=4.79, rear_overhang=0.97)
+        self.assertEqual(len(mesh.faces), 307356 - 2828)
         used = mesh.vertices[np.unique(mesh.faces)]
         lo, hi = used.min(0), used.max(0)
-        np.testing.assert_allclose(lo, (-0.98, -1.048, -0.33), atol=0.01)
-        np.testing.assert_allclose(hi, (3.714, 1.048, 1.126), atol=0.01)            # 2.10 m wide with mirrors
+        np.testing.assert_allclose(lo, (-0.97, -1.062, -0.33), atol=0.01)
+        np.testing.assert_allclose(hi, (3.82, 1.062, 1.32), atol=0.01)              # 2.12 m wide with mirrors
         for axis, (a, b) in enumerate(EGO_BOX):
             self.assertGreaterEqual(lo[axis], a)
             self.assertLessEqual(hi[axis], b)
@@ -288,8 +289,13 @@ class ModelInTheRepository(unittest.TestCase):
         self.assertEqual(int((car & ~box).sum()), 0)
         a = ov[..., 3]
         self.assertLess(float(np.abs(a - a[:, ::-1]).mean()), 2e-3)                  # left-right symmetric
-        paint = ov[car][:, :3]
-        self.assertGreater(float((paint.min(1) > 0.6).mean()), 0.2)                  # white paint is there
+        rgb = ov[car][:, :3]
+        blue = (rgb[:, 2] > rgb[:, 0] + 0.08) & (rgb[:, 2] > 0.3)
+        self.assertGreater(float(blue.mean()), 0.2)                                  # grey-blue paint is there
+        T, K = chase_camera(torch.eye(4))                                            # the tail light is thin
+        rgb = render_mesh(mesh, T.double().numpy(), K.double().numpy(), 720, 1280, shadow=0.0, supersample=1)
+        red = (rgb[..., 3] > 0.5) & (rgb[..., 0] > 0.5) & (rgb[..., 0] > 2.0 * rgb[..., 2])
+        self.assertGreater(int(red.sum()), 5)                                        # and the red tail light
 
 
 class SoftConfidence(unittest.TestCase):

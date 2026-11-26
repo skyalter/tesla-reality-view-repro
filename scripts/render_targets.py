@@ -23,8 +23,8 @@ Logs with DONE are skipped.
 
 Debugging without a head checkpoint: ``--untrained --model-name da3-base [--backbone-checkpoint <last.pt>]``
 uses an untrained appearance branch with every opacity set to ``--opacity``.
-The ego vehicle (``--ego-model``): by default the model in assets/ego_models/tesla_m3_wintrez ("Tesla M3
-model" by wintrez, CC BY 4.0, see the README there), drawn in white; 'sedan' is a plain car built in code, and
+The ego vehicle (``--ego-model``): by default the model in assets/ego_models/tesla_my_2025_bloxbloger
+("2025 Tesla Model Y" by BloxBloger, CC BY-NC 4.0, see the README there), drawn in grey-blue; 'sedan' is a plain car built in code, and
 any .glb or .obj file can be given with --ego-model-axes, --ego-model-size and --ego-model-color.
 ``--preview`` renders a few moments of the first log from several candidate cameras into one comparison image
 and a table (holes and confidence per camera).
@@ -46,14 +46,14 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
-# named car models: file, (forward, up) axes of the file, (length, rear overhang) in metres, replaced colours
+# named car models: file, (forward, up) axes of the file, (length, rear overhang) in metres, replaced colours,
+# materials that are not drawn
 EGO_MODELS = {
-    "tesla-m3": {
-        "file": REPO / "assets/ego_models/tesla_m3_wintrez/3a602469d7874d1397efa67182198705.glb",
-        "axes": ("+z", "+y"), "size": (4.694, 0.98),
-        "colors": {"carpaint": (0.86, 0.87, 0.89), "carBrand": (0.86, 0.87, 0.89),
-                   "LicensePlateText": (0.8, 0.8, 0.8), "LicensePlateRed": (0.8, 0.8, 0.8),
-                   "LicensePlateYellow": (0.8, 0.8, 0.8)},
+    "tesla-my": {
+        "file": REPO / "assets/ego_models/tesla_my_2025_bloxbloger/2025_tesla_model_y.glb",
+        "axes": ("+z", "+y"), "size": (4.79, 0.97),
+        "colors": {"Material_2125765635": (0.42, 0.50, 0.60)},     # the paint: grey-blue
+        "skip": ("glass_headlight222",),                           # dark lamp glass that hides the red tail light
     },
 }
 DEFAULT_CANDIDATES = "13,9,18,80;12,8,17,80;10,6,14,80;7,4,12,70"
@@ -80,8 +80,8 @@ def parse_args(argv=None):
                         "drawn: the virtual camera would otherwise sit inside tree crowns and other things "
                         "above the road. With the default camera the road at the lower image edge is about "
                         "12 m away, the ego vehicle further.")
-    p.add_argument("--ego-model", default="tesla-m3",
-                   help="the car laid over the chase images for display: 'tesla-m3' (the model in assets/), "
+    p.add_argument("--ego-model", default="tesla-my",
+                   help="the car laid over the chase images for display: 'tesla-my' (the model in assets/), "
                         "'sedan' (built in code, no file), the path of a .glb or .obj file, or 'none'")
     p.add_argument("--ego-model-axes", nargs=2, default=None, metavar=("FORWARD", "UP"),
                    help="the axes of the file that point to the front and the top of the car (a file: +x +z)")
@@ -238,7 +238,7 @@ def ego_layers(args, ref_T_ego, ref_T_cam, K, H, W):
             colors.update({k: tuple(float(x) for x in v.split(","))
                            for k, v in (item.split("=", 1) for item in args.ego_model_color)})
             path = str(preset["file"])
-            extra = {"colors": colors} if path.lower().endswith(".glb") else {}
+            extra = {"colors": colors, "skip": preset.get("skip", ())} if path.lower().endswith(".glb") else {}
             length, overhang = args.ego_model_size or preset["size"]
             mesh = place_mesh(load_mesh(path, **extra), *(args.ego_model_axes or preset["axes"]),
                               length=length, rear_overhang=overhang)
