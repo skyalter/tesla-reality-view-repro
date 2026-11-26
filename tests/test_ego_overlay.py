@@ -263,6 +263,35 @@ class GlbFiles(unittest.TestCase):
             self.load()
 
 
+class ModelInTheRepository(unittest.TestCase):
+    PATH = os.path.join(_util.REPO, "assets", "ego_models", "tesla_m3_wintrez",
+                        "3a602469d7874d1397efa67182198705.glb")
+
+    def test_size_place_and_outline(self):
+        if not os.path.isfile(self.PATH):
+            self.skipTest("the car model is not in this checkout")
+        mesh = place_mesh(load_glb(self.PATH, colors={"carpaint": (0.86, 0.87, 0.89)}), "+z", "+y",
+                          length=4.694, rear_overhang=0.98)
+        self.assertEqual(len(mesh.faces), 247356)
+        used = mesh.vertices[np.unique(mesh.faces)]
+        lo, hi = used.min(0), used.max(0)
+        np.testing.assert_allclose(lo, (-0.98, -1.048, -0.33), atol=0.01)
+        np.testing.assert_allclose(hi, (3.714, 1.048, 1.126), atol=0.01)            # 2.10 m wide with mirrors
+        for axis, (a, b) in enumerate(EGO_BOX):
+            self.assertGreaterEqual(lo[axis], a)
+            self.assertLessEqual(hi[axis], b)
+        T, K = chase_camera(torch.eye(4), width=320, height=180)
+        ov = render_mesh(mesh, T.double().numpy(), K.double().numpy(), 180, 320, shadow=0.0, supersample=2)
+        car = ov[..., 3] > 0.5
+        self.assertGreater(int(car.sum()), 300)
+        box = ego_box_mask(torch.eye(4), T, K, 180, 320).numpy()
+        self.assertEqual(int((car & ~box).sum()), 0)
+        a = ov[..., 3]
+        self.assertLess(float(np.abs(a - a[:, ::-1]).mean()), 2e-3)                  # left-right symmetric
+        paint = ov[car][:, :3]
+        self.assertGreater(float((paint.min(1) > 0.6).mean()), 0.2)                  # white paint is there
+
+
 class SoftConfidence(unittest.TestCase):
     def test_values(self):
         alpha = torch.tensor([1.0, 1.0, 1.0, 0.8, 0.4])

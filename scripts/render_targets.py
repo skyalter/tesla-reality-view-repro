@@ -23,12 +23,9 @@ Logs with DONE are skipped.
 
 Debugging without a head checkpoint: ``--untrained --model-name da3-base [--backbone-checkpoint <last.pt>]``
 uses an untrained appearance branch with every opacity set to ``--opacity``.
-The ego vehicle: the built-in sedan needs no file. A model file is not part of this repository; the one used
-for the project's images is "Tesla M3 model" by wintrez (CC BY 4.0,
-https://sketchfab.com/3d-models/3a602469d7874d1397efa67182198705; also in Objaverse as
-glbs/000-135/3a602469d7874d1397efa67182198705.glb), repainted and laid in with
-    --ego-model <file>.glb --ego-model-axes +z +y --ego-model-size 4.694 0.98 \
-        --ego-model-color carpaint=0.86,0.87,0.89 --ego-model-color carBrand=0.86,0.87,0.89
+The ego vehicle (``--ego-model``): by default the model in assets/ego_models/tesla_m3_wintrez ("Tesla M3
+model" by wintrez, CC BY 4.0, see the README there), drawn in white; 'sedan' is a plain car built in code, and
+any .glb or .obj file can be given with --ego-model-axes, --ego-model-size and --ego-model-color.
 ``--preview`` renders a few moments of the first log from several candidate cameras into one comparison image
 and a table (holes and confidence per camera).
 """
@@ -48,6 +45,17 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+REPO = Path(__file__).resolve().parents[1]
+# named car models: file, (forward, up) axes of the file, (length, rear overhang) in metres, replaced colours
+EGO_MODELS = {
+    "tesla-m3": {
+        "file": REPO / "assets/ego_models/tesla_m3_wintrez/3a602469d7874d1397efa67182198705.glb",
+        "axes": ("+z", "+y"), "size": (4.694, 0.98),
+        "colors": {"carpaint": (0.86, 0.87, 0.89), "carBrand": (0.86, 0.87, 0.89),
+                   "LicensePlateText": (0.8, 0.8, 0.8), "LicensePlateRed": (0.8, 0.8, 0.8),
+                   "LicensePlateYellow": (0.8, 0.8, 0.8)},
+    },
+}
 DEFAULT_CANDIDATES = "13,9,18,80;12,8,17,80;10,6,14,80;7,4,12,70"
 
 
@@ -72,16 +80,16 @@ def parse_args(argv=None):
                         "drawn: the virtual camera would otherwise sit inside tree crowns and other things "
                         "above the road. With the default camera the road at the lower image edge is about "
                         "12 m away, the ego vehicle further.")
-    p.add_argument("--ego-model", default="sedan",
-                   help="the car laid over the chase images for display: 'sedan' (built in, no file), the path of "
-                        "a .glb or .obj file, or 'none'")
-    p.add_argument("--ego-model-axes", nargs=2, default=("+x", "+z"), metavar=("FORWARD", "UP"),
-                   help="with a file: the axes of the file that point to the front and the top of the car")
-    p.add_argument("--ego-model-size", type=float, nargs=2, default=(4.87, 1.10), metavar=("LENGTH", "OVERHANG"),
-                   help="with a file: the model is scaled to LENGTH metres and its rear end put OVERHANG metres "
-                        "behind the rear axle")
+    p.add_argument("--ego-model", default="tesla-m3",
+                   help="the car laid over the chase images for display: 'tesla-m3' (the model in assets/), "
+                        "'sedan' (built in code, no file), the path of a .glb or .obj file, or 'none'")
+    p.add_argument("--ego-model-axes", nargs=2, default=None, metavar=("FORWARD", "UP"),
+                   help="the axes of the file that point to the front and the top of the car (a file: +x +z)")
+    p.add_argument("--ego-model-size", type=float, nargs=2, default=None, metavar=("LENGTH", "OVERHANG"),
+                   help="the model is scaled to LENGTH metres and its rear end put OVERHANG metres behind the "
+                        "rear axle (a file: 4.87 1.10)")
     p.add_argument("--ego-model-color", action="append", default=[], metavar="MATERIAL=R,G,B",
-                   help="with a .glb: replace the colour of a material (0..1); can be given several times")
+                   help="replace the colour of a material of a .glb (0..1); can be given several times")
     p.add_argument("--ego-mask", default=None, choices=("box", "model"),
                    help="the area without supervision (confidence 0): 'model' = the outline of --ego-model grown "
                         "by --ego-mask-grow pixels (default), 'box' = the projected box around the vehicle "
@@ -109,6 +117,10 @@ def parse_args(argv=None):
         p.error("--checkpoint is required (or --untrained for debugging)")
     if 0 not in args.context:
         p.error("--context must contain 0")
+    if args.ego_model in EGO_MODELS and not EGO_MODELS[args.ego_model]["file"].is_file():
+        print(f"ego model {args.ego_model}: {EGO_MODELS[args.ego_model]['file']} is missing, using 'sedan'",
+              flush=True)
+        args.ego_model = "sedan"
     if args.ego_mask is None:
         args.ego_mask = "box" if args.ego_model == "none" else "model"
     if args.ego_mask == "model" and args.ego_model == "none":
@@ -220,12 +232,16 @@ def ego_layers(args, ref_T_ego, ref_T_cam, K, H, W):
         if args.ego_model == "sedan":
             mesh = sedan_mesh()
         else:
-            extra = {}
-            if args.ego_model_color:
-                extra["colors"] = {k: tuple(float(x) for x in v.split(","))
-                                   for k, v in (item.split("=", 1) for item in args.ego_model_color)}
-            mesh = place_mesh(load_mesh(args.ego_model, **extra), *args.ego_model_axes,
-                              length=args.ego_model_size[0], rear_overhang=args.ego_model_size[1])
+            preset = EGO_MODELS.get(args.ego_model, {"file": args.ego_model, "axes": ("+x", "+z"),
+                                                     "size": (4.87, 1.10), "colors": {}})
+            colors = dict(preset["colors"])
+            colors.update({k: tuple(float(x) for x in v.split(","))
+                           for k, v in (item.split("=", 1) for item in args.ego_model_color)})
+            path = str(preset["file"])
+            extra = {"colors": colors} if path.lower().endswith(".glb") else {}
+            length, overhang = args.ego_model_size or preset["size"]
+            mesh = place_mesh(load_mesh(path, **extra), *(args.ego_model_axes or preset["axes"]),
+                              length=length, rear_overhang=overhang)
         ego_T_cam = (torch.linalg.inv(ref_T_ego.double()) @ ref_T_cam.double()).cpu().numpy()
         overlay = render_mesh(mesh, ego_T_cam, K.double().cpu().numpy(), H, W)
         if args.ego_mask == "model":
@@ -281,7 +297,7 @@ def render_log(model, task, ds, log_index, args, info):
                       "width": W, "height": H, "K": K.cpu().tolist(), "K_convention": "integer pixel centres",
                       "ego_T_cam": ego_T_cam.cpu().tolist(), "camera_axes": "OpenCV (x right, y down, z forward)",
                       "ego_box": EGO_BOX, "ego_mask": args.ego_mask, "ego_mask_grow_px": args.ego_mask_grow,
-                      "ego_model": args.ego_model if args.ego_model in ("sedan", "none")
+                      "ego_model": args.ego_model if args.ego_model in ("sedan", "none", *EGO_MODELS)
                       else os.path.basename(args.ego_model), "context_frames": list(args.context), "stride": args.stride,
                       "tolerance": args.tolerance, "mode": args.mode, "near_m": args.near, "model": info,
                       "code_version": code_version()}
