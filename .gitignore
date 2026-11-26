@@ -6,6 +6,7 @@ lighthouse/local.env
 /weights/
 /outputs/
 *.safetensors
+!assets/stage2_prompt.safetensors
 *.pt
 *.pth
 *.ckpt

@@ -23,6 +23,8 @@ dependencies = [
 [project.optional-dependencies]
 # the Gaussian head: rendering and the perceptual loss
 render = ["gsplat>=1.5", "lpips>=0.1.4", "torchvision"]
+# stage 2: writing sampled videos; encoding the fixed prompt once (scripts/encode_prompt.py)
+stage2 = ["imageio", "imageio-ffmpeg", "tokenizers"]
 
 [tool.setuptools.packages.find]
 include = ["realityview*"]

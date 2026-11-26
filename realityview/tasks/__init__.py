@@ -9,6 +9,7 @@ import importlib
 TASKS = {
     "stage1_backbone": "realityview.tasks.stage1_backbone:Stage1BackboneTask",
     "stage1_head": "realityview.tasks.stage1_head:Stage1HeadTask",
+    "stage2_diffusion": "realityview.tasks.stage2_diffusion:Stage2DiffusionTask",
     "toy": "realityview.tasks.toy:ToyTask",
 }
 

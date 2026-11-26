@@ -1,0 +1,26 @@
+# Stage 2 on one or two logs with the small stage-1 network (DA3-BASE) and a small picture: a check that the
+# model learns to draw from the features. One GPU with 32 GB.
+#
+#   python scripts/train.py --config configs/stage2_overfit_base.yaml \
+#       --set run_dir=<dir> data.root=<processed root> data.chase_root=<render_targets output> \
+#             data.video_root=<make_video_frames output> model.weights_root=<weights dir> \
+#             model.stage1.head_checkpoint=<last.pt of a stage1_head run with da3-base> data.train_logs=[<log id>]
+base: stage2_diffusion.yaml
+total_steps: 800
+batch_size: 1
+num_workers: 4
+schedule: {warmup_steps: 50, min_lr: 1.0e-5}
+log_every: 10
+checkpoint_every: 400
+keep_every: 0
+eval_every: 400
+
+model:
+  stage1: {name: da3-base}
+
+data:
+  train_first: null
+  eval_split: train           # the same log: this only asks whether the model can learn at all
+  eval_clips: 2
+  clip_frames: 33
+  size: [576, 320]

@@ -1,0 +1,48 @@
+# Stage 2: the video diffusion model (Wan2.1 1.3B backbone) that draws the chase view from the camera features.
+# The full run: 6 GPUs with 80 GB, two samples each.
+#
+#   torchrun --nproc_per_node=6 scripts/train.py --config configs/stage2_diffusion.yaml \
+#       --set run_dir=<dir> data.root=<processed root> data.chase_root=<render_targets output> \
+#             data.video_root=<make_video_frames output> model.weights_root=<weights dir> \
+#             model.stage1.head_checkpoint=<last.pt of the stage1_head run>
+#
+# Values not listed here keep the defaults in realityview/tasks/stage2_diffusion.py and
+# realityview/engine/trainer.py.
+task: stage2_diffusion
+seed: 0
+total_steps: 10000
+batch_size: 2                 # per GPU
+num_workers: 6                # data-loading processes per GPU (a sample is about 125 images)
+optimizer: {betas: [0.9, 0.999], weight_decay: 0.01, no_decay_1d: true}
+schedule: {warmup_steps: 500, min_lr: 1.0e-6}
+grad_clip: 1.0
+log_every: 20
+checkpoint_every: 500
+keep_every: 2500
+eval_every: 1000
+
+model:
+  dit: wan2.1-t2v-1.3b
+  weights_root: ${RV_WEIGHTS}
+  stage1:
+    name: da3-large-1.1
+    head_checkpoint: ${RV_HEAD_CHECKPOINT}    # last.pt of the stage1_head run
+    pose_scale: 20.0
+  cond_every: 2
+  use_depth: true
+  scope: adapters+self_attn
+  lr_new: 1.0e-4
+  lr_pretrained: 1.0e-5
+
+data:
+  root: ${RV_PROCESSED}
+  chase_root: ${RV_CHASE}
+  video_root: ${RV_VIDEO}
+  train_logs: data_lists/av2_train_stage1.txt
+  train_first: 150
+  eval_logs: null             # set to a list with chase targets and video frames to get sampled videos
+  clip_frames: 41
+  size: [832, 480]
+
+loss: {w_min: 0.05, c_ref: 0.5}
+sample: {steps: 30, guidance: 3.0, shift: 5.0}
