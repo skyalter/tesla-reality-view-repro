@@ -48,10 +48,38 @@ WEIGHTS = {
         },
         "use": "sky scores during preprocessing",
     },
+    "wan2.1-t2v-1.3b": {
+        "repo": "Wan-AI/Wan2.1-T2V-1.3B",
+        "revision": "37ec512624d61f7aa208f7ea8140a131f93afc9a",
+        "files": {
+            "diffusion_pytorch_model.safetensors": (
+                5676070424, "96b6b242ca1c2f24e9d02cd6596066fab6d310e2d7538f33ae267cb18d957e8f"),
+            "Wan2.1_VAE.pth": (507609880, "38071ab59bd94681c686fa51d75a1968f64e470262043be31f7a094e442fd981"),
+            "config.json": (249, None),
+        },
+        "use": "video diffusion backbone and video autoencoder of stage 2",
+    },
+    "wan2.1-text-encoder": {
+        "repo": "Wan-AI/Wan2.1-T2V-1.3B",
+        "revision": "37ec512624d61f7aa208f7ea8140a131f93afc9a",
+        "files": {
+            "models_t5_umt5-xxl-enc-bf16.pth": (
+                11361920418, "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d"),
+            "google/umt5-xxl/spiece.model": (
+                4548313, "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"),
+            "google/umt5-xxl/tokenizer.json": (
+                16837417, "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"),
+            "google/umt5-xxl/tokenizer_config.json": (61728, None),
+            "google/umt5-xxl/special_tokens_map.json": (6623, None),
+        },
+        "use": "only to encode the fixed prompt once (scripts/encode_prompt.py); can be deleted afterwards",
+    },
 }
 SETS = {
     "debug": ["da3-base"],
     "stage1": ["da3-large-1.1", "da3-base", "da3metric-large"],
+    "stage2": ["wan2.1-t2v-1.3b"],
+    "stage2_text": ["wan2.1-text-encoder"],
 }
 CHUNK = 1 << 20
 
@@ -140,6 +168,11 @@ def main() -> int:
     if lock_rows:
         lock = args.dest / "WEIGHTS.lock.tsv"
         header = "name\trepo\trevision\tfile\tbytes\tsha256\n"
+        # keep the rows of the other sets: the lock file describes everything under --dest
+        done = {(r[0], r[3]) for r in lock_rows}
+        if lock.is_file():
+            old = [tuple(line.split("\t")) for line in lock.read_text().splitlines()[1:] if line.strip()]
+            lock_rows = [r for r in old if len(r) == 6 and (r[0], r[3]) not in done] + lock_rows
         lock.write_text(header + "".join("\t".join(r) + "\n" for r in lock_rows))
         print(f"lock file: {lock}")
     if failed:

@@ -2,7 +2,9 @@
 overlay over an image, the mask of the car, and the soft confidence."""
 from __future__ import annotations
 
+import json
 import os
+import struct
 import tempfile
 import unittest
 
@@ -11,8 +13,8 @@ import numpy as np
 import torch
 
 from realityview.render.camera import chase_camera
-from realityview.render.ego_overlay import (SEDAN, Mesh, composite, load_obj, load_overlay, place_mesh, render_mesh,
-                                            save_overlay, sedan_mesh)
+from realityview.render.ego_overlay import (SEDAN, Mesh, composite, load_glb, load_mesh, load_obj, load_overlay,
+                                            place_mesh, render_mesh, save_overlay, sedan_mesh)
 from realityview.render.targets import EGO_BOX, ego_box_mask, overlay_mask, soft_confidence
 
 
@@ -191,6 +193,74 @@ class ObjFiles(unittest.TestCase):
         np.testing.assert_allclose(placed.vertices[4], (3.0, -1.0, -0.3), atol=1e-9)
         with self.assertRaises(ValueError):
             place_mesh(mesh, forward="+x", up="-x")
+
+
+def write_glb(path: str, doc: dict, binary: bytes) -> None:
+    text = json.dumps(doc).encode()
+    text += b" " * (-len(text) % 4)
+    binary += b"\0" * (-len(binary) % 4)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<4sII", b"glTF", 2, 12 + 8 + len(text) + 8 + len(binary)))
+        f.write(struct.pack("<I4s", len(text), b"JSON") + text)
+        f.write(struct.pack("<I4s", len(binary), b"BIN\0") + binary)
+
+
+class GlbFiles(unittest.TestCase):
+    def setUp(self):
+        # one triangle, used by two nodes: as it is (paint), and moved by 10 along x and mirrored in y (glass)
+        pos = np.asarray([[0, 0, 0], [1, 0, 0], [0, 1, 0]], np.float32).tobytes()
+        idx = np.asarray([0, 1, 2], np.uint16).tobytes()
+        self.binary = pos + idx
+        self.doc = {
+            "asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}],
+            "nodes": [{"children": [1, 2]}, {"mesh": 0},
+                      {"mesh": 1, "translation": [10, 0, 0], "scale": [1, -1, 1]}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "material": 0}]},
+                       {"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "material": 1}]}],
+            "materials": [{"name": "paint", "pbrMetallicRoughness": {"baseColorFactor": [1.0, 0.0, 0.2140, 1.0]}},
+                          {"name": "glass", "alphaMode": "BLEND",
+                           "pbrMetallicRoughness": {"baseColorFactor": [1.0, 1.0, 1.0, 0.25]}}],
+            "buffers": [{"byteLength": len(self.binary)}],
+            "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36},
+                            {"buffer": 0, "byteOffset": 36, "byteLength": 6}],
+            "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"},
+                          {"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"}]}
+
+    def load(self, **kwargs) -> Mesh:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "car.glb")
+            write_glb(path, self.doc, self.binary)
+            return load_mesh(path, **kwargs)
+
+    def test_nodes_and_colours(self):
+        m = self.load()
+        self.assertEqual(m.vertices.shape, (6, 3))
+        self.assertEqual(m.faces.shape, (2, 3))
+        by_colour = {tuple(np.round(c, 2)): f for f, c in zip(m.faces, m.colors)}
+        paint, glass = by_colour[(1.0, 0.0, 0.5)], by_colour[(0.25, 0.25, 0.25)]     # sRGB; glass x opacity
+        np.testing.assert_allclose(m.vertices[paint], [[0, 0, 0], [1, 0, 0], [0, 1, 0]])
+        moved = m.vertices[glass]
+        np.testing.assert_allclose(sorted(map(tuple, moved)), [(10, -1, 0), (10, 0, 0), (11, 0, 0)])
+        # both faces still point the same way (+z): the mirrored one was turned around
+        for f in (paint, glass):
+            a, b, c = m.vertices[f]
+            self.assertGreater(np.cross(b - a, c - a)[2], 0)
+
+    def test_replace_and_skip(self):
+        m = self.load(colors={"paint": (0.1, 0.2, 0.3)}, skip=("glass",))
+        self.assertEqual(m.faces.shape, (1, 3))
+        np.testing.assert_allclose(m.colors[0], (0.1, 0.2, 0.3))
+
+    def test_rejects_other_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "x.glb")
+            with open(path, "wb") as f:
+                f.write(b"not a glb file at all")
+            with self.assertRaises(ValueError):
+                load_glb(path)
+        self.doc["extensionsRequired"] = ["KHR_draco_mesh_compression"]
+        with self.assertRaises(ValueError):
+            self.load()
 
 
 class SoftConfidence(unittest.TestCase):

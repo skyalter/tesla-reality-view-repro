@@ -23,6 +23,12 @@ Logs with DONE are skipped.
 
 Debugging without a head checkpoint: ``--untrained --model-name da3-base [--backbone-checkpoint <last.pt>]``
 uses an untrained appearance branch with every opacity set to ``--opacity``.
+The ego vehicle: the built-in sedan needs no file. A model file is not part of this repository; the one used
+for the project's images is "Tesla M3 model" by wintrez (CC BY 4.0,
+https://sketchfab.com/3d-models/3a602469d7874d1397efa67182198705; also in Objaverse as
+glbs/000-135/3a602469d7874d1397efa67182198705.glb), repainted and laid in with
+    --ego-model <file>.glb --ego-model-axes +z +y --ego-model-size 4.694 0.98 \
+        --ego-model-color carpaint=0.86,0.87,0.89 --ego-model-color carBrand=0.86,0.87,0.89
 ``--preview`` renders a few moments of the first log from several candidate cameras into one comparison image
 and a table (holes and confidence per camera).
 """
@@ -68,9 +74,14 @@ def parse_args(argv=None):
                         "12 m away, the ego vehicle further.")
     p.add_argument("--ego-model", default="sedan",
                    help="the car laid over the chase images for display: 'sedan' (built in, no file), the path of "
-                        "a Wavefront OBJ, or 'none'")
+                        "a .glb or .obj file, or 'none'")
     p.add_argument("--ego-model-axes", nargs=2, default=("+x", "+z"), metavar=("FORWARD", "UP"),
-                   help="with an OBJ: the axes of the file that point to the front and the top of the car")
+                   help="with a file: the axes of the file that point to the front and the top of the car")
+    p.add_argument("--ego-model-size", type=float, nargs=2, default=(4.87, 1.10), metavar=("LENGTH", "OVERHANG"),
+                   help="with a file: the model is scaled to LENGTH metres and its rear end put OVERHANG metres "
+                        "behind the rear axle")
+    p.add_argument("--ego-model-color", action="append", default=[], metavar="MATERIAL=R,G,B",
+                   help="with a .glb: replace the colour of a material (0..1); can be given several times")
     p.add_argument("--ego-mask", default=None, choices=("box", "model"),
                    help="the area without supervision (confidence 0): 'model' = the outline of --ego-model grown "
                         "by --ego-mask-grow pixels (default), 'box' = the projected box around the vehicle "
@@ -200,14 +211,21 @@ def merged(t, context, cache, device):
 
 def ego_layers(args, ref_T_ego, ref_T_cam, K, H, W):
     """(ego mask (H, W) bool on the device of K, overlay (H, W, 4) float RGBA in RGB order or None)."""
-    from realityview.render.ego_overlay import load_obj, place_mesh, render_mesh, sedan_mesh
+    from realityview.render.ego_overlay import load_mesh, place_mesh, render_mesh, sedan_mesh
     from realityview.render.targets import ego_box_mask, overlay_mask
 
     overlay = None
     mask = ego_box_mask(ref_T_ego, ref_T_cam, K, H, W)
     if args.ego_model != "none":
-        mesh = sedan_mesh() if args.ego_model == "sedan" else place_mesh(load_obj(args.ego_model),
-                                                                         *args.ego_model_axes)
+        if args.ego_model == "sedan":
+            mesh = sedan_mesh()
+        else:
+            extra = {}
+            if args.ego_model_color:
+                extra["colors"] = {k: tuple(float(x) for x in v.split(","))
+                                   for k, v in (item.split("=", 1) for item in args.ego_model_color)}
+            mesh = place_mesh(load_mesh(args.ego_model, **extra), *args.ego_model_axes,
+                              length=args.ego_model_size[0], rear_overhang=args.ego_model_size[1])
         ego_T_cam = (torch.linalg.inv(ref_T_ego.double()) @ ref_T_cam.double()).cpu().numpy()
         overlay = render_mesh(mesh, ego_T_cam, K.double().cpu().numpy(), H, W)
         if args.ego_mask == "model":

@@ -8,13 +8,16 @@ Meshes are in the ego frame (origin at the centre of the rear axle, x forward, y
 
 - ``sedan_mesh()`` builds a plain three-box sedan from a few numbers (default: the outline of the Argoverse 2
   vehicle, a Ford Fusion). It needs no file.
-- ``load_obj(path)`` reads a Wavefront OBJ (with the diffuse colours of its MTL file, if any); ``place_mesh``
-  turns and scales a mesh from its own axes into the ego frame.
+- ``load_obj(path)`` reads a Wavefront OBJ (with the diffuse colours of its MTL file, if any) and
+  ``load_glb(path)`` a binary glTF (base colours of the materials, no textures); ``load_mesh`` picks by the
+  file name. ``place_mesh`` turns and scales a mesh from its own axes into the ego frame.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
+import struct
 from dataclasses import dataclass
 
 import numpy as np
@@ -196,6 +199,124 @@ def _load_mtl(path: str) -> dict:
             elif parts[0] == "Kd" and name is not None:
                 out[name] = tuple(float(x) for x in parts[1:4])
     return out
+
+
+def _node_matrix(node: dict) -> np.ndarray:
+    if "matrix" in node:
+        return np.asarray(node["matrix"], np.float64).reshape(4, 4).T          # glTF stores columns first
+    M = np.eye(4)
+    if "scale" in node:
+        M = np.diag([*node["scale"], 1.0]) @ M
+    if "rotation" in node:
+        x, y, z, w = node["rotation"]
+        R = np.asarray([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+        T = np.eye(4)
+        T[:3, :3] = R
+        M = T @ M
+    if "translation" in node:
+        T = np.eye(4)
+        T[:3, 3] = node["translation"]
+        M = T @ M
+    return M
+
+
+def _srgb(linear: np.ndarray) -> np.ndarray:
+    x = np.clip(np.asarray(linear, np.float64), 0.0, 1.0)
+    return np.where(x <= 0.0031308, 12.92 * x, 1.055 * x ** (1.0 / 2.4) - 0.055)
+
+
+def load_glb(path: str, default_color=BODY, colors: dict | None = None, skip=()) -> Mesh:
+    """A binary glTF 2.0 file (.glb) as one triangle mesh in the axes of its scene.
+
+    Only what a plain car model needs: triangle primitives with indices, positions as floats, the node
+    transforms, and per material the base colour (stored linear, returned as sRGB; a see-through material is
+    darkened by its opacity, because the overlay has no transparency inside the car). Textures, compressed
+    buffers and external files are not read. ``colors`` maps material names to (r, g, b) 0..1 that replace
+    the colour of the file; primitives whose material name is in ``skip`` are left out."""
+    with open(path, "rb") as fh:
+        blob = fh.read()
+    magic, version, _ = struct.unpack_from("<4sII", blob, 0)
+    if magic != b"glTF" or version != 2:
+        raise ValueError(f"{path}: not a binary glTF 2.0 file")
+    offset, doc, binary = 12, None, None
+    while offset < len(blob):
+        size, kind = struct.unpack_from("<I4s", blob, offset)
+        chunk = blob[offset + 8:offset + 8 + size]
+        if kind == b"JSON":
+            doc = json.loads(chunk)
+        elif kind == b"BIN\0":
+            binary = chunk
+        offset += 8 + size + (-size) % 4
+    if doc is None or binary is None:
+        raise ValueError(f"{path}: needs a JSON and a binary chunk")
+    if doc.get("extensionsRequired"):
+        raise ValueError(f"{path}: needs glTF extensions that are not supported: {doc['extensionsRequired']}")
+    dtypes = {5120: np.int8, 5121: np.uint8, 5122: np.int16, 5123: np.uint16, 5125: np.uint32, 5126: np.float32}
+    width = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
+
+    def accessor(i: int) -> np.ndarray:
+        a = doc["accessors"][i]
+        if "sparse" in a or "bufferView" not in a:
+            raise ValueError(f"{path}: sparse accessors are not supported")
+        view = doc["bufferViews"][a["bufferView"]]
+        if view.get("buffer", 0) != 0:
+            raise ValueError(f"{path}: external buffers are not supported")
+        dt, n = np.dtype(dtypes[a["componentType"]]), width[a["type"]]
+        start = view.get("byteOffset", 0) + a.get("byteOffset", 0)
+        stride = view.get("byteStride") or dt.itemsize * n
+        raw = np.frombuffer(binary, np.uint8, count=stride * (a["count"] - 1) + dt.itemsize * n, offset=start)
+        if stride == dt.itemsize * n:
+            return raw.view(dt).reshape(a["count"], n)
+        rows = np.lib.stride_tricks.as_strided(raw, (a["count"], dt.itemsize * n), (stride, 1))
+        return np.ascontiguousarray(rows).view(dt).reshape(a["count"], n)
+
+    def colour(index) -> tuple:
+        if index is None:
+            return None, tuple(default_color)
+        m = doc["materials"][index]
+        name = m.get("name")
+        if colors and name in colors:
+            return name, tuple(colors[name])
+        base = m.get("pbrMetallicRoughness", {}).get("baseColorFactor", (1.0, 1.0, 1.0, 1.0))
+        rgb = _srgb(base[:3])
+        if m.get("alphaMode") == "BLEND":
+            rgb = rgb * base[3]
+        return name, tuple(rgb)
+
+    vertices, faces, cols, count = [], [], [], 0
+    nodes = doc.get("nodes", [])
+    stack = [(i, np.eye(4)) for i in doc["scenes"][doc.get("scene", 0)]["nodes"]]
+    while stack:
+        i, parent = stack.pop()
+        node = nodes[i]
+        M = parent @ _node_matrix(node)
+        stack += [(c, M) for c in node.get("children", [])]
+        if "mesh" not in node:
+            continue
+        for prim in doc["meshes"][node["mesh"]]["primitives"]:
+            if prim.get("mode", 4) != 4 or "indices" not in prim:
+                continue
+            name, rgb = colour(prim.get("material"))
+            if name in skip:
+                continue
+            v = accessor(prim["attributes"]["POSITION"]).astype(np.float64)
+            f = accessor(prim["indices"]).astype(np.int64).reshape(-1, 3)
+            if np.linalg.det(M[:3, :3]) < 0:                   # a mirroring node turns the faces around
+                f = f[:, ::-1]
+            vertices.append(v @ M[:3, :3].T + M[:3, 3])
+            faces.append(f + count)
+            cols.append(np.tile(np.asarray(rgb, np.float64), (len(f), 1)))
+            count += len(v)
+    if not faces:
+        raise ValueError(f"{path}: no triangles")
+    return Mesh(np.concatenate(vertices), np.concatenate(faces), np.concatenate(cols))
+
+
+def load_mesh(path: str, **kwargs) -> Mesh:
+    """``load_glb`` for .glb, ``load_obj`` otherwise."""
+    return load_glb(path, **kwargs) if path.lower().endswith(".glb") else load_obj(path, **kwargs)
 
 
 _AXES = {"+x": (1, 0, 0), "-x": (-1, 0, 0), "+y": (0, 1, 0), "-y": (0, -1, 0), "+z": (0, 0, 1), "-z": (0, 0, -1)}
