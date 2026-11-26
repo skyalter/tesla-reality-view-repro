@@ -32,3 +32,21 @@ Copyright (c) Meta Platforms, Inc. and affiliates. The full license text is in `
 
 The pretrained weights are not part of this repository. DA3-BASE is published under Apache-2.0; for
 DA3-LARGE-1.1 the Hugging Face model card says Apache-2.0 while the DA3 README says CC BY-NC 4.0.
+
+## Wan2.1 model code
+
+`realityview/models/diffusion/wan/vae.py`, `t5.py`
+
+Copied from [Wan2.1](https://github.com/Wan-Video/Wan2.1) (commit `9737cba`), files `wan/modules/vae.py`
+(the video autoencoder) and `wan/modules/t5.py` (the text encoder, used once by `scripts/encode_prompt.py`).
+Changes: `torch.cuda.amp.autocast` replaced by `torch.autocast`; in `t5.py` the tokenizer wrapper and the
+`T5EncoderModel` class are left out. Each file keeps its copyright line and says what was changed.
+`realityview/models/diffusion/wan_dit.py` is our own re-implementation of the diffusion backbone with the
+parameter names of the original, so that the published weights load.
+
+Apache License 2.0, Copyright 2024-2025 The Alibaba Wan Team Authors. The full license text is in
+`realityview/models/diffusion/wan/LICENSE.txt`.
+
+`assets/stage2_prompt.safetensors` is the output of that text encoder (weights of Wan2.1-T2V-1.3B,
+Apache-2.0) for one fixed prompt. The pretrained weights themselves are not part of this repository;
+`scripts/download_weights.py` fetches Wan2.1-T2V-1.3B (Apache-2.0) at a pinned revision.

@@ -264,3 +264,23 @@ class Stage2DiffusionTask:
                 tag = f"{n:02d}_{name}_{str(batch['log_id'][0])[:8]}_{int(batch['moment'][0])}"
                 write_video(os.path.join(out_dir, tag + ".mp4"), np.concatenate([target, video], axis=2))
         return {k: sums[k] / counts[k] for k in sorted(sums)}
+
+
+def load_trained_model(checkpoint: str, overrides: dict | None = None):
+    """Rebuild the model of a stage2_diffusion run from its checkpoint (``last.pt``).
+
+    Returns (model in evaluation mode on the CPU, task). The checkpoint holds the trained parts only; the
+    frozen ones (stage-1 network, video autoencoder, text tokens) are built again from their own files, so
+    ``overrides`` ({"model": {...}, "data": {...}}, merged over the stored configuration) must point at them
+    when the paths of the machine the run was made on do not exist here.
+    """
+    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    cfg = merge(dict(state["cfg"]), overrides or {})
+    task = Stage2DiffusionTask(cfg)
+    model = task.build_model()
+    missing, unexpected = model.load_state_dict(state["model"], strict=False)
+    missing = [k for k in missing if not k.startswith(tuple(task.checkpoint_skip))]
+    if missing or unexpected:
+        raise RuntimeError(f"checkpoint does not fit the model: missing {missing[:5]}, unexpected {unexpected[:5]}")
+    task.step = int(state.get("step", 0))
+    return model.eval(), task
