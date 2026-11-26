@@ -79,8 +79,8 @@ def quat_mul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
                         aw * bz + ax * by - ay * bx + az * bw], dim=-1)
 
 
-def chase_camera(ref_T_ego: torch.Tensor, back_m: float = 7.0, up_m: float = 4.0, pitch_down_deg: float = 12.0,
-                 hfov_deg: float = 70.0, width: int = 1280, height: int = 720):
+def chase_camera(ref_T_ego: torch.Tensor, back_m: float = 13.0, up_m: float = 9.0, pitch_down_deg: float = 18.0,
+                 hfov_deg: float = 80.0, width: int = 1280, height: int = 720):
     """A virtual camera behind and above the ego vehicle, looking forward and down.
 
     The camera sits ``back_m`` behind and ``up_m`` above the centre of the rear axle (the ego origin) and is

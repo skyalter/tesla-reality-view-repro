@@ -6,7 +6,8 @@ and gives Gaussians in the reference frame of t plus, per Gaussian, the number o
 confirm its depth (``count_observations``). The target of moment t merges the Gaussians of the moments
 t + c for c in ``--context`` (frames, 20 Hz; static Gaussians from all of them, moving objects from t only),
 moved into the reference frame of t, and renders them from a camera ``--back`` metres behind and ``--up``
-metres above the rear axle, pitched down by ``--pitch`` degrees.
+metres above the rear axle, pitched down by ``--pitch`` degrees (default: 13 m, 9 m, 18 degrees, 80 degrees
+horizontal field of view).
 
     python scripts/render_targets.py --checkpoint <head run>/last.pt --weights-root <weights dir> \\
         --data-root <processed root> --split train --logs data_lists/av2_train_stage1.txt --first 2 --out <dir>
@@ -41,7 +42,7 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-DEFAULT_CANDIDATES = "7,4,12,70;9,5,15,90;10.5,5.6,16,80;10,6,14,80;10,6,14,90"
+DEFAULT_CANDIDATES = "13,9,18,80;12,8,17,80;10,6,14,80;7,4,12,70"
 
 
 def parse_args(argv=None):
@@ -55,23 +56,25 @@ def parse_args(argv=None):
     p.add_argument("--shard", type=int, nargs=2, default=None, metavar=("INDEX", "COUNT"),
                    help="of those logs, only every COUNT-th starting at INDEX (to split the work over GPUs)")
     p.add_argument("--out", required=True)
-    p.add_argument("--back", type=float, default=7.0, help="camera distance behind the rear axle, m")
-    p.add_argument("--up", type=float, default=4.0, help="camera height above the rear axle, m")
-    p.add_argument("--pitch", type=float, default=12.0, help="downward pitch, degrees")
-    p.add_argument("--hfov", type=float, default=70.0, help="horizontal field of view, degrees")
+    p.add_argument("--back", type=float, default=13.0, help="camera distance behind the rear axle, m")
+    p.add_argument("--up", type=float, default=9.0, help="camera height above the rear axle, m")
+    p.add_argument("--pitch", type=float, default=18.0, help="downward pitch, degrees")
+    p.add_argument("--hfov", type=float, default=80.0, help="horizontal field of view, degrees")
     p.add_argument("--size", type=int, nargs=2, default=(1280, 720), metavar=("W", "H"))
-    p.add_argument("--near", type=float, default=3.0,
+    p.add_argument("--near", type=float, default=7.0,
                    help="Gaussians closer than this to the chase camera (metres along its optical axis) are not "
                         "drawn: the virtual camera would otherwise sit inside tree crowns and other things "
-                        "above the road. The ego vehicle and the road are further away than this.")
+                        "above the road. With the default camera the road at the lower image edge is about "
+                        "12 m away, the ego vehicle further.")
     p.add_argument("--ego-model", default="sedan",
                    help="the car laid over the chase images for display: 'sedan' (built in, no file), the path of "
                         "a Wavefront OBJ, or 'none'")
     p.add_argument("--ego-model-axes", nargs=2, default=("+x", "+z"), metavar=("FORWARD", "UP"),
                    help="with an OBJ: the axes of the file that point to the front and the top of the car")
-    p.add_argument("--ego-mask", default="box", choices=("box", "model"),
-                   help="the area without supervision (confidence 0): the projected box around the vehicle, or "
-                        "the outline of --ego-model grown by --ego-mask-grow pixels")
+    p.add_argument("--ego-mask", default=None, choices=("box", "model"),
+                   help="the area without supervision (confidence 0): 'model' = the outline of --ego-model grown "
+                        "by --ego-mask-grow pixels (default), 'box' = the projected box around the vehicle "
+                        "(default with --ego-model none)")
     p.add_argument("--ego-mask-grow", type=int, default=4)
     p.add_argument("--context", type=int, nargs="+", default=(-40, -20, 0, 20, 40),
                    help="moments merged into one target, front-center frames relative to t (20 Hz)")
@@ -95,6 +98,8 @@ def parse_args(argv=None):
         p.error("--checkpoint is required (or --untrained for debugging)")
     if 0 not in args.context:
         p.error("--context must contain 0")
+    if args.ego_mask is None:
+        args.ego_mask = "box" if args.ego_model == "none" else "model"
     if args.ego_mask == "model" and args.ego_model == "none":
         p.error("--ego-mask model needs --ego-model")
     return args

@@ -102,6 +102,21 @@ class SedanInTheChaseCamera(unittest.TestCase):
         self.assertEqual(int((car & ~box).sum()), 0)
         self.assertGreater(car.sum() / box.sum(), 0.35)
 
+    def test_default_camera_sees_the_whole_car(self):
+        T, K = chase_camera(torch.eye(4))                       # 13 m behind, 9 m up, 18 degrees down, 1280 x 720
+        self.assertAlmostEqual(float(T[0, 3]), -13.0)
+        self.assertAlmostEqual(float(T[2, 3]), 9.0)
+        ov = render_mesh(sedan_mesh(), T.double().numpy(), K.double().numpy(), 720, 1280, shadow=0.0, supersample=1)
+        car = ov[..., 3] > 0
+        rows, cols = np.nonzero(car.any(1))[0], np.nonzero(car.any(0))[0]
+        self.assertGreater(rows[0], 360)                        # below the image centre
+        self.assertLess(rows[-1], 700)                          # not cut by the lower edge
+        self.assertAlmostEqual(0.5 * (cols[0] + cols[-1]), 639.5, delta=1.0)
+        self.assertGreater(cols[-1] - cols[0], 80)             # the car is about 95 pixels wide
+        self.assertLess(cols[-1] - cols[0], 120)
+        box = ego_box_mask(torch.eye(4), T, K, 720, 1280).numpy()
+        self.assertEqual(int((car & ~box).sum()), 0)
+
     def test_left_right_symmetric(self):
         a = self.body[..., 3]
         self.assertLess(float(np.abs(a - a[:, ::-1]).mean()), 2e-3)
