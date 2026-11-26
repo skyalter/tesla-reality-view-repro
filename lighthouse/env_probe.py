@@ -11,10 +11,22 @@ import sys
 import time
 
 
+def cxx_runtime() -> str:
+    """The libstdc++ this process has loaded. PyTorch pulls one in on import, and gsplat's extension,
+    built by the environment's compiler, needs one at least as new as that compiler."""
+    try:
+        with open("/proc/self/maps") as maps:
+            paths = {line.split()[-1] for line in maps if "libstdc++" in line}
+    except OSError:
+        return "unknown"
+    return ", ".join(sorted(paths)) or "none loaded"
+
+
 def main() -> int:
     import torch
 
     print("torch", torch.__version__, "| built for CUDA", torch.version.cuda)
+    print("C++ runtime:", cxx_runtime())
     if not torch.cuda.is_available():
         print("FAILED: torch cannot see a GPU (driver too old for this build, or no GPU in this allocation)")
         return 1
@@ -48,7 +60,17 @@ def main() -> int:
         colors = torch.rand(n, 3, device="cuda", generator=g)
         viewmat = torch.eye(4, device="cuda")[None]
         k = torch.tensor([[300.0, 0.0, w / 2], [0.0, 300.0, h / 2], [0.0, 0.0, 1.0]], device="cuda")[None]
-        image, alpha, _ = rasterization(means, quats, scales, opacities, colors, viewmat, k, w, h, render_mode="RGB+ED")
+        try:
+            image, alpha, _ = rasterization(means, quats, scales, opacities, colors, viewmat, k, w, h,
+                                            render_mode="RGB+ED")
+        except ImportError as error:  # the compiled extension is loaded on first use
+            if "CXXABI" not in str(error) and "GLIBCXX" not in str(error):
+                raise
+            print("FAILED: gsplat's compiled extension needs a newer C++ runtime than the one this process loaded")
+            print("  loaded:", cxx_runtime())
+            print("  error: ", error)
+            print("  the cluster scripts preload the environment's copy: see rv_gsplat_env in lighthouse/common.sh")
+            return 1
         image[..., :3].mean().backward()
         torch.cuda.synchronize()
         print(f"gsplat render and backward ok in {time.time() - t0:.0f} s (includes compiling on first use):",

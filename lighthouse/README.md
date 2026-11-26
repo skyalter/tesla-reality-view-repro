@@ -41,6 +41,13 @@ lighthouse/setup_env.sh cu130            # driver 580 or newer; use cu126 for dr
 lighthouse/test_env.sh h100 --gsplat     # one short GPU allocation: torch sees the GPU, gsplat compiles and renders
 ```
 
+gsplat compiles its CUDA code on first use with the compiler inside the environment. The check and the job
+scripts set this up in one place (`rv_gsplat_env` in `common.sh`):
+
+- The code is compiled for the L40S and the H100. For other GPUs set `RV_CUDA_ARCH_LIST` in `local.env`.
+- The environment's own `libstdc++` is preloaded. Without it PyTorch loads the system's copy first, and on
+  an older system (RHEL 8) the compiled extension fails to import with `CXXABI_1.3.15 not found`.
+
 ## Jobs
 
 Everything after the download runs as a batch job. `submit.sh` snapshots the committed code, so a queued

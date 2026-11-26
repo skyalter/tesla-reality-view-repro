@@ -23,14 +23,10 @@ PROBE_ARGS="${2:-}"
 
 srun -A "$RV_ACCOUNT" -p "$RV_PARTITION" --gpus-per-node="$GPU:1" -c 8 --mem=32G -t 15 --immediate=300 bash -c "
   set -eo pipefail
-  . '$RV_CONDA_SH'
-  conda activate '$RV_ENV'
-  export PYTHONNOUSERSITE=1
-  # gsplat compiles with the CUDA toolkit inside the environment; build for both GPU generations.
-  export CUDA_HOME=\"\$CONDA_PREFIX\"
-  export CPATH=\"\$CONDA_PREFIX/targets/x86_64-linux/include\${CPATH:+:\$CPATH}\"
-  export LIBRARY_PATH=\"\$CONDA_PREFIX/targets/x86_64-linux/lib:\$CONDA_PREFIX/lib\${LIBRARY_PATH:+:\$LIBRARY_PATH}\"
-  export TORCH_CUDA_ARCH_LIST='8.9;9.0'
+  . '$LH_DIR/common.sh'
+  rv_activate
+  # gsplat: compile settings and the C++ runtime of the environment (see common.sh).
+  rv_gsplat_env
   export MAX_JOBS=8
   echo \"node: \$(hostname)\"
   python '$LH_DIR/env_probe.py' $PROBE_ARGS

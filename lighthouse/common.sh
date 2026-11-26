@@ -37,3 +37,28 @@ rv_activate() {
   conda activate "$RV_ENV" || { echo "environment $RV_ENV is missing; run lighthouse/setup_env.sh" >&2; return 1; }
   export PYTHONNOUSERSITE=1
 }
+
+# Settings for compiling gsplat's CUDA code and for loading the result. Call after rv_activate.
+rv_gsplat_env() {
+  # gsplat compiles on first use, with the CUDA toolkit and the compiler inside the environment.
+  export CUDA_HOME="$CONDA_PREFIX"
+  export CPATH="$CONDA_PREFIX/targets/x86_64-linux/include${CPATH:+:$CPATH}"
+  export LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:$CONDA_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+  # A GPU generation the build was not compiled for generally cannot run it, and every job shares one
+  # build, so name all of them: compute capability 8.9 is the L40S, 9.0 the H100. Other hardware: set
+  # RV_CUDA_ARCH_LIST in local.env.
+  export TORCH_CUDA_ARCH_LIST="${RV_CUDA_ARCH_LIST:-8.9;9.0}"
+  # Code from that compiler needs the environment's own C++ runtime, but PyTorch loads the system's copy
+  # first. Where the system is older than the compiler (RHEL 8, for one), gsplat's extension then fails
+  # to import with "version `CXXABI_1.3.15' not found". Preloading the environment's copy makes every
+  # process started from here use it.
+  local runtime="$CONDA_PREFIX/lib/libstdc++.so.6"
+  if [ -e "$runtime" ]; then
+    case ":${LD_PRELOAD:-}:" in
+      *":$runtime:"*) ;;
+      *) export LD_PRELOAD="$runtime${LD_PRELOAD:+:$LD_PRELOAD}" ;;
+    esac
+  else
+    echo "WARNING: $runtime is missing; gsplat's extension may fail to load" >&2
+  fi
+}
