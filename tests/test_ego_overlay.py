@@ -105,8 +105,8 @@ class SedanInTheChaseCamera(unittest.TestCase):
         self.assertGreater(car.sum() / box.sum(), 0.35)
 
     def test_default_camera_sees_the_whole_car(self):
-        T, K = chase_camera(torch.eye(4))                       # 13 m behind, 9 m up, 18 degrees down, 1280 x 720
-        self.assertAlmostEqual(float(T[0, 3]), -13.0)
+        T, K = chase_camera(torch.eye(4))                       # 15 m behind, 9 m up, 18 degrees down, 1280 x 720
+        self.assertAlmostEqual(float(T[0, 3]), -15.0)
         self.assertAlmostEqual(float(T[2, 3]), 9.0)
         ov = render_mesh(sedan_mesh(), T.double().numpy(), K.double().numpy(), 720, 1280, shadow=0.0, supersample=1)
         car = ov[..., 3] > 0
@@ -292,10 +292,10 @@ class ModelInTheRepository(unittest.TestCase):
         rgb = ov[car][:, :3]
         blue = (rgb[:, 2] > rgb[:, 0] + 0.08) & (rgb[:, 2] > 0.3)
         self.assertGreater(float(blue.mean()), 0.2)                                  # grey-blue paint is there
-        T, K = chase_camera(torch.eye(4))                                            # the tail light is thin
+        T, K = chase_camera(torch.eye(4), 8.0, 5.0, 18.0, 80.0)                      # close: the tail light is thin
         rgb = render_mesh(mesh, T.double().numpy(), K.double().numpy(), 720, 1280, shadow=0.0, supersample=1)
         red = (rgb[..., 3] > 0.5) & (rgb[..., 0] > 0.5) & (rgb[..., 0] > 2.0 * rgb[..., 2])
-        self.assertGreater(int(red.sum()), 5)                                        # and the red tail light
+        self.assertGreater(int(red.sum()), 10)                                       # and the red tail light
 
 
 class SoftConfidence(unittest.TestCase):

@@ -6,7 +6,7 @@ and gives Gaussians in the reference frame of t plus, per Gaussian, the number o
 confirm its depth (``count_observations``). The target of moment t merges the Gaussians of the moments
 t + c for c in ``--context`` (frames, 20 Hz; static Gaussians from all of them, moving objects from t only),
 moved into the reference frame of t, and renders them from a camera ``--back`` metres behind and ``--up``
-metres above the rear axle, pitched down by ``--pitch`` degrees (default: 13 m, 9 m, 18 degrees, 80 degrees
+metres above the rear axle, pitched down by ``--pitch`` degrees (default: 15 m, 9 m, 18 degrees, 80 degrees
 horizontal field of view).
 
     python scripts/render_targets.py --checkpoint <head run>/last.pt --weights-root <weights dir> \\
@@ -56,7 +56,7 @@ EGO_MODELS = {
         "skip": ("glass_headlight222",),                           # dark lamp glass that hides the red tail light
     },
 }
-DEFAULT_CANDIDATES = "13,9,18,80;12,8,17,80;10,6,14,80;7,4,12,70"
+DEFAULT_CANDIDATES = "15,9,18,80;13,9,18,80;10,6,14,80;7,4,12,70"
 
 
 def parse_args(argv=None):
@@ -70,7 +70,7 @@ def parse_args(argv=None):
     p.add_argument("--shard", type=int, nargs=2, default=None, metavar=("INDEX", "COUNT"),
                    help="of those logs, only every COUNT-th starting at INDEX (to split the work over GPUs)")
     p.add_argument("--out", required=True)
-    p.add_argument("--back", type=float, default=13.0, help="camera distance behind the rear axle, m")
+    p.add_argument("--back", type=float, default=15.0, help="camera distance behind the rear axle, m")
     p.add_argument("--up", type=float, default=9.0, help="camera height above the rear axle, m")
     p.add_argument("--pitch", type=float, default=18.0, help="downward pitch, degrees")
     p.add_argument("--hfov", type=float, default=80.0, help="horizontal field of view, degrees")
