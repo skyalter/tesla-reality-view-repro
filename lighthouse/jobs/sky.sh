@@ -8,6 +8,8 @@ run() {
   echo "+ $*"
   "$@" || status=1
 }
+# Logs processed before a check limit changed are judged again from their stored numbers (seconds).
+run python scripts/rejudge_checks.py --out-root "$RV_PROCESSED"
 for split in train val; do
   run python scripts/sky_scores.py --out-root "$RV_PROCESSED" --split "$split" \
     --weights "$RV_WEIGHTS/da3metric-large/model.safetensors" --workers "${SLURM_CPUS_PER_TASK:-8}"
@@ -15,7 +17,7 @@ done
 run python scripts/check_data.py --out-root "$RV_PROCESSED" --split train --overlays --require-sky --read-samples 1000
 run python scripts/check_data.py --out-root "$RV_PROCESSED" --split val --overlays --require-sky --read-samples 300
 
-rv_to_nas "$RV_PROCESSED" "data_av2_v1" --include "checks_*.json" --include "overlays/**" --include "runs/**" \
+rv_to_nas "$RV_PROCESSED" "data_av2_v1" --include "checks_*.json" --include "logs/*/*/CHECKS.json" --include "overlays/**" --include "runs/**" \
   --include "CONFIG.*" --include "CODE_COMMIT.txt" --include "splits/**" || status=1
 rv_log_to_nas "data_av2_v1"
 [ "$status" = 0 ] && echo "SKY AND CHECKS OK" || echo "SKY OR CHECKS FAILED: see the messages above"

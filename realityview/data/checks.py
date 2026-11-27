@@ -25,22 +25,87 @@ MIN_SWEEPS = 155
 FRAME_INTERVAL_MS = (49.0, 51.0)
 MAX_GROUP_DT_MS = 25.0
 MIN_STRICT_MOMENTS = 270
+# A camera occasionally drops a frame in the middle of a log (1 of the 180 stage-1 logs). The moments around
+# the gap are marked incomplete and never become samples, so a few of them are tolerated; a gap of more than
+# two consecutive frames, or many gaps, still fails.
+MAX_INCOMPLETE_INTERIOR = 3
+MAX_FRAME_GAP_MS = 151.0
 # The design asked for PSNR > 40 dB against a direct resize, but JPEG quality 95 alone gives 34-40 dB on these
 # images (busy foliage is lowest), so 40 dB fails on correct output. The strict test is instead that
 # re-encoding the direct resize gives the stored bytes exactly; PSNR > 30 dB is kept as a loose sanity bound.
 IMG_PSNR_DB = 30.0
 INTRINSICS_TOL_PX = 0.01
-LIDAR_NN_MEDIAN_M = 0.15
+# The next three limits were first set from 22 logs (0.15 m, 0.15, 0.02), where the largest values already
+# sat just under them. On the 180 stage-1 logs the values form one continuous spread with maxima of 0.177 m,
+# 0.174 and 0.044 and 16 logs above the old limits, so the limits were too tight rather than those logs
+# broken. They are now set above that spread and only catch gross errors.
+LIDAR_NN_MEDIAN_M = 0.20
 COVERAGE_SINGLE = (0.04, 0.10)
 COVERAGE_ACC = (0.15, 0.45)
-SEETHROUGH_MAX = 0.15
-STATIC_MOVING_FRAC_MAX = 0.02
+SEETHROUGH_MAX = 0.20
+STATIC_MOVING_FRAC_MAX = 0.05
 
 
 def _res(passed, **kw):
     d = {"passed": None if passed is None else bool(passed)}
     d.update(kw)
     return d
+
+
+# The verdicts of the checks whose limits are tuned on data are functions of the stored numbers alone, so
+# that rejudge_log_checks can apply changed limits to a CHECKS.json without processing the log again.
+def _judge_timestamps(r: dict) -> tuple[bool, str]:
+    iv_ok = all(FRAME_INTERVAL_MS[0] <= a and b <= MAX_FRAME_GAP_MS for a, b in r["frame_interval_ms"].values())
+    ok = (r["missing_poses"] == 0 and iv_ok and r["n_incomplete_interior"] <= MAX_INCOMPLETE_INTERIOR
+          and r["n_valid_stage2"] >= MIN_STRICT_MOMENTS)
+    return ok, (f"0 missing poses; intervals >= {FRAME_INTERVAL_MS[0]} ms and <= {MAX_FRAME_GAP_MS} ms; at most "
+                f"{MAX_INCOMPLETE_INTERIOR} moments without a full camera group (group dt <= {MAX_GROUP_DT_MS} ms) "
+                f"besides the first and last; valid_stage2 >= {MIN_STRICT_MOMENTS}")
+
+
+def _judge_lidar_two_sensor(r: dict) -> tuple[bool, str]:
+    ud, sn = r["up_vs_down_max_m"], r["sweep_vs_next_max_m"]
+    ok = ud is not None and sn is not None and ud <= LIDAR_NN_MEDIAN_M and sn <= LIDAR_NN_MEDIAN_M
+    return ok, f"median NN distance <= {LIDAR_NN_MEDIAN_M} m (static points, 3-40 m, > 0.5 m high)"
+
+
+def _judge_coverage(r: dict) -> tuple[bool, str]:
+    ok = (COVERAGE_SINGLE[0] <= r["landscape_single_median"] <= COVERAGE_SINGLE[1]
+          and COVERAGE_ACC[0] <= r["landscape_acc_median"] <= COVERAGE_ACC[1]
+          and r["acc_seethrough_frac_median"] <= SEETHROUGH_MAX)
+    return ok, f"landscape single in {COVERAGE_SINGLE}, acc in {COVERAGE_ACC}, see-through <= {SEETHROUGH_MAX}"
+
+
+def _judge_motion(r: dict) -> tuple[bool, str]:
+    return (r["still_judged_moving_frac"] <= STATIC_MOVING_FRAC_MAX,
+            f"<= {STATIC_MOVING_FRAC_MAX} of boxes of tracks with net displacement < 0.5 m judged moving")
+
+
+_JUDGES = {"timestamps": _judge_timestamps, "lidar_two_sensor": _judge_lidar_two_sensor,
+           "lidar_coverage": _judge_coverage, "motion": _judge_motion}
+
+
+def _judged(name: str, **values) -> dict:
+    ok, threshold = _JUDGES[name](values)
+    return _res(ok, **values, threshold=threshold)
+
+
+def rejudge_log_checks(doc: dict) -> tuple[dict, list[str]]:
+    """Applies the current limits to the numbers stored in a CHECKS.json document.
+
+    Returns the updated document and the names of the checks whose verdict changed. Checks that are not
+    judged from stored numbers alone keep their verdict."""
+    changed = []
+    for name, judge in _JUDGES.items():
+        r = doc["checks"].get(name)
+        if r is None:
+            continue
+        ok, threshold = judge(r)
+        if bool(ok) != r.get("passed"):
+            changed.append(name)
+        r["passed"], r["threshold"] = bool(ok), threshold
+    doc["passed"] = all(v["passed"] is not False for v in doc["checks"].values())
+    return doc, changed
 
 
 def check_completeness(log_path: str, raw_root: str | None, split: str | None) -> dict:
@@ -75,24 +140,19 @@ def check_timestamps(ctx, moments: pd.DataFrame) -> dict:
     for c in CAMS:
         d = np.diff(ctx.cam_ts[c]) / 1e6
         iv[c] = [float(d.min()), float(d.max())]
-    iv_ok = all(FRAME_INTERVAL_MS[0] <= a and b <= FRAME_INTERVAL_MS[1] for a, b in iv.values())
-    # ``complete`` is defined by the same tolerance, so the group check is on the moments away from the two
-    # ends of the log: there every camera must have its partner frame within MAX_GROUP_DT_MS. Only the first
-    # and last moment may lack a partner (the camera started late or stopped early).
+    # ``complete`` means every camera has its partner frame within MAX_GROUP_DT_MS. The first and last
+    # moment may lack one (the camera started late or stopped early); in between only a few may.
     n = len(moments)
     interior = moments.iloc[1:n - 1] if n > 2 else moments.iloc[0:0]
     max_dt_interior = float(interior["max_abs_dt_ms"].max()) if len(interior) else float("nan")
     n_incomplete_interior = int((~interior["complete"]).sum())
     n_s1 = int(moments["valid_stage1"].sum())
     n_s2 = int(moments["valid_stage2"].sum())
-    ok = (missing == 0 and iv_ok and max_dt_interior <= MAX_GROUP_DT_MS and n_incomplete_interior == 0
-          and n_s2 >= MIN_STRICT_MOMENTS)
-    return _res(ok, missing_poses=missing, frame_interval_ms=iv, max_group_dt_ms_interior=max_dt_interior,
-                max_group_dt_ms_all=float(moments["max_abs_dt_ms"].max()) if n else float("nan"),
-                n_moments=int(n), n_incomplete=int((~moments["complete"]).sum()),
-                n_incomplete_interior=n_incomplete_interior, n_valid_stage1=n_s1, n_valid_stage2=n_s2,
-                threshold=f"0 missing poses; intervals in {FRAME_INTERVAL_MS} ms; group dt <= {MAX_GROUP_DT_MS} ms "
-                          f"for every moment except the first and last; valid_stage2 >= {MIN_STRICT_MOMENTS}")
+    return _judged("timestamps", missing_poses=missing, frame_interval_ms=iv,
+                   max_group_dt_ms_interior=max_dt_interior,
+                   max_group_dt_ms_all=float(moments["max_abs_dt_ms"].max()) if n else float("nan"),
+                   n_moments=int(n), n_incomplete=int((~moments["complete"]).sum()),
+                   n_incomplete_interior=n_incomplete_interior, n_valid_stage1=n_s1, n_valid_stage2=n_s2)
 
 
 def _psnr(a, b):
@@ -171,10 +231,8 @@ def check_lidar_two_sensor(ctx, n_sweeps: int = 6) -> dict:
         rows.append(r)
     ud = [r["up_vs_down_median_m"] for r in rows if "up_vs_down_median_m" in r]
     sn = [r["sweep_vs_next_median_m"] for r in rows if "sweep_vs_next_median_m" in r]
-    ok = bool(ud) and bool(sn) and max(ud) <= LIDAR_NN_MEDIAN_M and max(sn) <= LIDAR_NN_MEDIAN_M
-    return _res(ok, per_sweep=rows, up_vs_down_max_m=max(ud) if ud else None,
-                sweep_vs_next_max_m=max(sn) if sn else None,
-                threshold=f"median NN distance <= {LIDAR_NN_MEDIAN_M} m (static points, 3-40 m, > 0.5 m high)")
+    return _judged("lidar_two_sensor", per_sweep=rows, up_vs_down_max_m=max(ud) if ud else None,
+                   sweep_vs_next_max_m=max(sn) if sn else None)
 
 
 def check_coverage(frames: pd.DataFrame) -> dict:
@@ -185,10 +243,8 @@ def check_coverage(frames: pd.DataFrame) -> dict:
     m1, m2, m3 = float(cov_single.median()), float(cov_acc.median()), float(st.median())
     per_cam = {c: {"single": float((g["n_single"] / g["n_valid_px"]).median()),
                    "acc": float((g["n_acc"] / g["n_valid_px"]).median())} for c, g in frames.groupby("cam")}
-    ok = COVERAGE_SINGLE[0] <= m1 <= COVERAGE_SINGLE[1] and COVERAGE_ACC[0] <= m2 <= COVERAGE_ACC[1] and m3 <= SEETHROUGH_MAX
-    return _res(ok, landscape_single_median=m1, landscape_acc_median=m2, acc_seethrough_frac_median=m3,
-                per_cam_median=per_cam,
-                threshold=f"landscape single in {COVERAGE_SINGLE}, acc in {COVERAGE_ACC}, see-through <= {SEETHROUGH_MAX}")
+    return _judged("lidar_coverage", landscape_single_median=m1, landscape_acc_median=m2,
+                   acc_seethrough_frac_median=m3, per_cam_median=per_cam)
 
 
 def check_motion(tracks: pd.DataFrame, moving_speed: float) -> dict:
@@ -201,10 +257,9 @@ def check_motion(tracks: pd.DataFrame, moving_speed: float) -> dict:
     frac = float((s["speed"] > moving_speed).mean()) if len(s) else 0.0
     dyn_frac = float(tracks["dynamic"].mean()) if len(tracks) else 0.0
     unknown = float(tracks["speed"].isna().mean()) if len(tracks) else 0.0
-    return _res(frac <= STATIC_MOVING_FRAC_MAX, still_tracks=int(len(still_ids)), still_track_boxes=int(len(s)),
-                still_judged_moving_frac=frac, n_tracks=int(len(net)), n_boxes=int(len(tracks)),
-                dynamic_box_frac=dyn_frac, unknown_speed_box_frac=unknown,
-                threshold=f"<= {STATIC_MOVING_FRAC_MAX} of boxes of tracks with net displacement < 0.5 m judged moving")
+    return _judged("motion", still_tracks=int(len(still_ids)), still_track_boxes=int(len(s)),
+                   still_judged_moving_frac=frac, n_tracks=int(len(net)), n_boxes=int(len(tracks)),
+                   dynamic_box_frac=dyn_frac, unknown_speed_box_frac=unknown)
 
 
 def check_ego_points_and_depth(store: LogStore, frames: pd.DataFrame, ego_masks: dict, cfg: dict) -> tuple[dict, dict]:

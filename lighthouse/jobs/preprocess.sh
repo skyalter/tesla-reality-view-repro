@@ -16,7 +16,7 @@ run python scripts/preprocess.py --raw-root "$RV_RAW" --out-root "$RV_PROCESSED"
 run python scripts/preprocess.py --raw-root "$RV_RAW" --out-root "$RV_PROCESSED" --workers "$WORKERS" \
   --split val --logs data_lists/av2_val_report20.txt
 
-rv_to_nas "$RV_PROCESSED" "data_av2_v1" --include "runs/**" --include "CONFIG.*" --include "CODE_COMMIT.txt" \
+rv_to_nas "$RV_PROCESSED" "data_av2_v1" --include "runs/**" --include "logs/*/*/CHECKS.json" --include "CONFIG.*" --include "CODE_COMMIT.txt" \
   --include "splits/**" || status=1
 rv_log_to_nas "data_av2_v1"
 [ "$status" = 0 ] && echo "PREPROCESS OK" || echo "PREPROCESS FAILED: see the messages above"

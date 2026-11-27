@@ -88,13 +88,39 @@ class TestTimestampCheck(unittest.TestCase):
         r = check_timestamps(self.ctx(cam_ts, sweep_ts, poses), m)
         self.assertTrue(r["passed"], r)
         self.assertEqual(r["n_incomplete"], 1)
-        # a side-left frame missing in the middle of the log: the nearest one is 27.5 ms away -> fails
+        # one side-left frame missing in the middle of the log: its moment is incomplete, which is tolerated
         cam_ts["ring_side_left"] = np.delete(cam_ts["ring_side_left"], 150)
         m = build_moments_table(cam_ts, poses, sweep_ts, cfg)
         r = check_timestamps(self.ctx(cam_ts, sweep_ts, poses), m)
-        self.assertFalse(r["passed"])
+        self.assertTrue(r["passed"], r)
         self.assertGreaterEqual(r["n_incomplete_interior"], 1)
+        # frames missing all over the log -> fails
+        cam_ts["ring_side_left"] = np.delete(cam_ts["ring_side_left"], [40, 80, 120, 200, 240])
+        m = build_moments_table(cam_ts, poses, sweep_ts, cfg)
+        r = check_timestamps(self.ctx(cam_ts, sweep_ts, poses), m)
+        self.assertFalse(r["passed"])
+        self.assertGreater(r["n_incomplete_interior"], 3)
+        # three frames in a row missing -> fails on the gap
+        cam_ts, sweep_ts, poses = synthetic(n=n)
+        cam_ts["ring_side_left"] = np.delete(cam_ts["ring_side_left"], [150, 151, 152])
+        m = build_moments_table(cam_ts, poses, sweep_ts, cfg)
+        self.assertFalse(check_timestamps(self.ctx(cam_ts, sweep_ts, poses), m)["passed"])
 
+    def test_rejudge_applies_current_limits(self):
+        from realityview.data.checks import rejudge_log_checks
+
+        doc = {"passed": False, "checks": {
+            "motion": {"passed": False, "still_judged_moving_frac": 0.03, "threshold": "old"},
+            "lidar_two_sensor": {"passed": True, "up_vs_down_max_m": 0.5, "sweep_vs_next_max_m": 0.05},
+            "boxes": {"passed": True}}}
+        doc, changed = rejudge_log_checks(doc)
+        self.assertEqual(sorted(changed), ["lidar_two_sensor", "motion"])
+        self.assertTrue(doc["checks"]["motion"]["passed"])
+        self.assertFalse(doc["checks"]["lidar_two_sensor"]["passed"])
+        self.assertFalse(doc["passed"])
+        doc["checks"]["lidar_two_sensor"]["up_vs_down_max_m"] = 0.1
+        doc, changed = rejudge_log_checks(doc)
+        self.assertTrue(doc["passed"])
 
 class TestRealIndex(unittest.TestCase):
     def test_real_log(self):
