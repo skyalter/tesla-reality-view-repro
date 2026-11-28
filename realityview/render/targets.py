@@ -69,6 +69,56 @@ def count_observations(g: Gaussians, depth: torch.Tensor, K: torch.Tensor, ref_T
     return counts
 
 
+def depth_jumps(depth: torch.Tensor) -> torch.Tensor:
+    """Per pixel, the largest relative depth step to one of its 4 neighbours: max(d1, d2) / min(d1, d2) - 1.
+
+    ``depth`` (N, H, W) > 0; returns (N, H, W). Both pixels of a step get its value. A plane seen at a grazing
+    angle has small steps (the road under a camera 1.7 m above it: about 1 / (rows below the horizon)); the
+    border between an object and what is behind it has large ones."""
+    out = torch.zeros_like(depth)
+    for dim in (1, 2):
+        n = depth.shape[dim] - 1
+        a, b = depth.narrow(dim, 0, n), depth.narrow(dim, 1, n)
+        step = torch.maximum(a, b) / torch.minimum(a, b).clamp(min=1e-6) - 1.0
+        lo, hi = out.narrow(dim, 0, n), out.narrow(dim, 1, n)
+        lo.copy_(torch.maximum(lo, step))
+        hi.copy_(torch.maximum(hi, step))
+    return out
+
+
+@torch.no_grad()
+def cleanup_mask(g: Gaussians, keep: torch.Tensor, depth: torch.Tensor, sky: torch.Tensor | None = None, *,
+                 sky_score: float | None = None, depth_jump: float | None = None,
+                 max_size: float | None = None) -> torch.Tensor:
+    """Which Gaussians of one sample to keep when the chase view is rendered: (G,) bool.
+
+    The Gaussians are trained and checked from the input cameras only; from a camera 9 m up three kinds of them
+    show as artefacts and can be left out (each test is off when its threshold is None):
+
+        sky_score    Gaussians from pixels with a sky score >= ``sky_score`` (``sky`` (N, H, W), the raw
+                     DA3METRIC score of the data set; 0.5 is the model's own sky mask)
+        depth_jump   Gaussians from pixels where the predicted depth steps by more than ``depth_jump``
+                     (relative, ``depth_jumps``) to a neighbour: they hang between an object and its background
+        max_size     Gaussians whose longest axis is more than ``max_size`` times the size of their source pixel
+                     at their depth (``footprint``): seen from close by they are large blurred blobs
+
+    ``keep`` (N, H, W) bool are the pixels the Gaussians were made from, in the order of ``g``
+    (``Stage1HeadTask.gaussian_masks``); ``depth`` (N, H, W) is the predicted depth of the input views.
+    """
+    if int(keep.sum()) != len(g):
+        raise ValueError(f"keep has {int(keep.sum())} pixels, there are {len(g)} Gaussians")
+    ok = torch.ones(len(g), dtype=torch.bool, device=g.means.device)
+    if sky_score is not None:
+        if sky is None:
+            raise ValueError("sky_score needs the sky scores of the input views")
+        ok &= sky[keep] < sky_score
+    if depth_jump is not None:
+        ok &= depth_jumps(depth.float())[keep] <= depth_jump
+    if max_size is not None:
+        ok &= g.scales.max(dim=-1).values <= max_size * g.footprint
+    return ok
+
+
 def merge_moments(parts):
     """Merge the Gaussians of several moments into one frame.
 

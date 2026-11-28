@@ -10,7 +10,8 @@ from _models_common import need_cuda
 
 from realityview.render.camera import chase_camera, rotmat_to_quat
 from realityview.render.gaussians import FLAG_MOVER, Gaussians, unproject
-from realityview.render.targets import count_observations, ego_box_mask, merge_moments, transform_gaussians
+from realityview.render.targets import (cleanup_mask, count_observations, depth_jumps, ego_box_mask, merge_moments,
+                                        transform_gaussians)
 
 H, W = 48, 64
 F = 50.0
@@ -140,6 +141,73 @@ class Merge(unittest.TestCase):
         self.assertTrue(torch.equal(n, torch.cat([na, nb[static_b]])))
         self.assertTrue(torch.allclose(g.means[100:], transform_gaussians(b, T).means[static_b]))
         self.assertTrue(torch.equal(g.means[:100], a.means))
+
+
+class Cleanup(unittest.TestCase):
+    def step_views(self):
+        """Two views of a wall at 10 m with something at 5 m in the columns 20..29."""
+        depth, K, T = plane_views([0.0, 1.0])
+        depth[:, :, 20:30] = 5.0
+        return depth, K, T
+
+    def test_depth_jumps_marks_both_sides_of_a_step(self):
+        depth, _, _ = self.step_views()
+        j = depth_jumps(depth)
+        self.assertEqual(j.shape, depth.shape)
+        for col in (19, 20, 29, 30):                       # the two pixels on each side of both steps
+            self.assertTrue(torch.allclose(j[:, :, col], torch.tensor(1.0)))
+        rest = torch.ones(W, dtype=torch.bool)
+        rest[[19, 20, 29, 30]] = False
+        self.assertEqual(float(j[:, :, rest].max()), 0.0)
+
+    def test_depth_jumps_is_small_on_a_slanted_plane(self):
+        # ground 1.7 m below a level camera: z = 1.7 F / (row - cy); 10 rows below the horizon the step is 10 %
+        rows = torch.arange(H, dtype=torch.float32) - (H - 1) / 2
+        depth = (1.7 * F / rows.clamp(min=0.5))[None, :, None].expand(1, H, W).clone()
+        j = depth_jumps(depth)
+        row = int((H - 1) / 2 + 10.5)
+        self.assertLess(float(j[0, row:, :].max()), 0.12)
+
+    def test_each_test_removes_its_gaussians_only(self):
+        depth, K, T = self.step_views()
+        g = gaussians_from_depth(depth, K, T)
+        keep = torch.ones_like(depth, dtype=torch.bool)
+        self.assertTrue(bool(cleanup_mask(g, keep, depth).all()))            # everything off: nothing removed
+
+        ok = cleanup_mask(g, keep, depth, depth_jump=0.2).reshape(depth.shape)
+        cols = torch.zeros(W, dtype=torch.bool)
+        cols[[19, 20, 29, 30]] = True
+        self.assertFalse(bool(ok[:, :, cols].any()))
+        self.assertTrue(bool(ok[:, :, ~cols].all()))
+
+        sky = torch.zeros_like(depth)
+        sky[:, :5] = 1.0
+        sky[:, 5] = 0.4
+        ok = cleanup_mask(g, keep, depth, sky, sky_score=0.5).reshape(depth.shape)
+        self.assertFalse(bool(ok[:, :5].any()))
+        self.assertTrue(bool(ok[:, 5:].all()))
+
+        scales = g.scales.clone()
+        scales[7, 1] = 4.5 * g.footprint[7]
+        scales[9, 2] = 3.5 * g.footprint[9]
+        ok = cleanup_mask(g.replace(scales=scales), keep, depth, max_size=4.0)
+        self.assertFalse(bool(ok[7]))
+        self.assertEqual(int((~ok).sum()), 1)
+
+    def test_follows_the_pixels_that_made_the_gaussians(self):
+        depth, K, T = self.step_views()
+        keep = torch.ones_like(depth, dtype=torch.bool)
+        keep[:, :, :25] = False                                  # only the right part made Gaussians
+        full = gaussians_from_depth(depth, K, T)
+        g = Gaussians(**{k: v[keep.reshape(-1)] for k, v in full.__dict__.items()})
+        ok = cleanup_mask(g, keep, depth, depth_jump=0.2)
+        expected = torch.ones_like(depth, dtype=torch.bool)
+        expected[:, :, [29, 30]] = False                          # the step at 19 | 20 made no Gaussians
+        self.assertTrue(torch.equal(ok, expected[keep]))
+        with self.assertRaises(ValueError):
+            cleanup_mask(full, keep, depth, depth_jump=0.2)
+        with self.assertRaises(ValueError):
+            cleanup_mask(g, keep, depth, sky_score=0.5)
 
 
 class EgoMask(unittest.TestCase):

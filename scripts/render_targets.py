@@ -26,6 +26,9 @@ uses an untrained appearance branch with every opacity set to ``--opacity``.
 The ego vehicle (``--ego-model``): by default the model in assets/ego_models/tesla_my_2025_bloxbloger
 ("2025 Tesla Model Y" by BloxBloger, CC BY-NC 4.0, see the README there), drawn in grey-blue; 'sedan' is a plain car built in code, and
 any .glb or .obj file can be given with --ego-model-axes, --ego-model-size and --ego-model-color.
+Optional clean-up before rendering (all off by default): ``--drop-sky``, ``--drop-depth-jump`` and
+``--drop-oversized`` leave out Gaussians that only look right from the input cameras (sky, the borders between
+an object and its background, oversized blobs); see ``realityview.render.targets.cleanup_mask``.
 ``--preview`` renders a few moments of the first log from several candidate cameras into one comparison image
 and a table (holes and confidence per camera).
 """
@@ -101,6 +104,15 @@ def parse_args(argv=None):
     p.add_argument("--max-moments", type=int, default=None, help="debugging: only the first n targets per log "
                                                                    "(the log is then not marked DONE)")
     p.add_argument("--tolerance", type=float, default=0.05, help="relative depth tolerance of an observation")
+    p.add_argument("--drop-sky", type=float, default=None, metavar="SCORE",
+                   help="leave out the Gaussians of pixels with a sky score >= SCORE (0.5 is the sky mask of the "
+                        "model that made the scores; needs the sky scores of scripts/sky_scores.py)")
+    p.add_argument("--drop-depth-jump", type=float, default=None, metavar="REL",
+                   help="leave out the Gaussians of pixels where the predicted depth steps by more than REL "
+                        "(relative, for example 0.2) to a neighbouring pixel")
+    p.add_argument("--drop-oversized", type=float, default=None, metavar="FACTOR",
+                   help="leave out Gaussians whose longest axis is more than FACTOR times the size of their "
+                        "source pixel at their depth (for example 4)")
     p.add_argument("--mode", default="antialiased", choices=("antialiased", "classic"))
     p.add_argument("--workers", type=int, default=2, help="data loader processes")
     p.add_argument("--device", default="cuda")
@@ -154,14 +166,14 @@ def build_dataset(task, args, logs):
     d = task.d
     return Stage1HeadDataset(args.data_root, args.split, logs, input_offsets=tuple(d["input_offsets"]),
                              front_center_mode=d["front_center_mode"], depth_layer=d["depth_layer"],
-                             with_sky=False, target_offsets=[0], min_displacement_m=0.0, seed=task.seed)
+                             with_sky=args.drop_sky is not None, target_offsets=[0], min_displacement_m=0.0, seed=task.seed)
 
 
 # ------------------------------------------------------------------------------------------------ moments
 @torch.no_grad()
 def moment_scene(model, task, batch, args) -> dict:
     """Run the model on one moment: its Gaussians (CPU), observation counts and frames."""
-    from realityview.render.targets import count_observations
+    from realityview.render.targets import cleanup_mask, count_observations
 
     keep, mover = task.gaussian_masks(batch)
     out = model(batch["images"], batch["ref_T_cam"], batch["K"], batch["dt"], keep, mover)
@@ -169,6 +181,11 @@ def moment_scene(model, task, batch, args) -> dict:
     if args.untrained:
         g = g.replace(opacities=torch.full_like(g.opacities, args.opacity))
     n_obs = count_observations(g, out["depth"][0], batch["K"][0], batch["ref_T_cam"][0], args.tolerance)
+    if args.drop_sky is not None or args.drop_depth_jump is not None or args.drop_oversized is not None:
+        ok = cleanup_mask(g, keep[0], out["depth"][0], batch.get("sky", [None])[0], sky_score=args.drop_sky,
+                          depth_jump=args.drop_depth_jump, max_size=args.drop_oversized)
+        g = g.__class__(**{k: v[ok] for k, v in g.__dict__.items()})
+        n_obs = n_obs[ok]
     fc = (batch["slot"][0] == task.t_slot) & (batch["cam_id"][0] == 0)
     return {"g": g.__class__(**{k: v.cpu() for k, v in g.__dict__.items()}), "n_obs": n_obs.cpu(),
             "city_T_ref": batch["city_T_ref"][0].double().cpu(), "ref_T_ego": batch["ref_T_ego"][0].float().cpu(),
@@ -299,7 +316,9 @@ def render_log(model, task, ds, log_index, args, info):
                       "ego_box": EGO_BOX, "ego_mask": args.ego_mask, "ego_mask_grow_px": args.ego_mask_grow,
                       "ego_model": args.ego_model if args.ego_model in ("sedan", "none", *EGO_MODELS)
                       else os.path.basename(args.ego_model), "context_frames": list(args.context), "stride": args.stride,
-                      "tolerance": args.tolerance, "mode": args.mode, "near_m": args.near, "model": info,
+                      "tolerance": args.tolerance, "mode": args.mode, "near_m": args.near,
+                      "cleanup": {"drop_sky": args.drop_sky, "drop_depth_jump": args.drop_depth_jump,
+                                  "drop_oversized": args.drop_oversized}, "model": info,
                       "code_version": code_version()}
             with open(os.path.join(folder, "camera.json"), "w") as f:
                 json.dump(camera, f, indent=2)
