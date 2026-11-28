@@ -33,7 +33,8 @@ for pid in "${pids[@]}"; do
 done
 tail -n 2 "$OUT"/shard_*.log || true
 
-done_logs="$(find "$OUT/train" -maxdepth 2 -name DONE 2>/dev/null | wc -l)"
+# A preview makes no per-log folders: a missing "$OUT/train" must not stop the job before the copy to the NAS.
+done_logs="$({ find "$OUT/train" -maxdepth 2 -name DONE 2>/dev/null || true; } | wc -l)"
 echo "logs complete: $done_logs"
 rv_to_nas "$OUT" "$RV_RUN_NAME" || status=1
 rv_log_to_nas "$RV_RUN_NAME"
