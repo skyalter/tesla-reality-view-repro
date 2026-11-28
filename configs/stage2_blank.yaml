@@ -1,0 +1,4 @@
+# Stage 2, version "blank": where a chase image has no content the model is trained to draw the background
+# colour. The only difference to configs/stage2_fill.yaml is loss.empty.
+base: stage2_diffusion.yaml
+loss: {empty: blank}

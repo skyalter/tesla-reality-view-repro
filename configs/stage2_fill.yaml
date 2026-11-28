@@ -1,0 +1,4 @@
+# Stage 2, version "fill": where a chase image has no content there is no loss, the model fills it in by
+# itself. The only difference to configs/stage2_blank.yaml is loss.empty.
+base: stage2_diffusion.yaml
+loss: {empty: fill}

@@ -1,7 +1,8 @@
 # Stage 2: the video diffusion model (Wan2.1 1.3B backbone) that draws the chase view from the camera features.
-# The full run: 6 GPUs with 80 GB, two samples each.
+# The two versions that are trained are configs/stage2_blank.yaml and configs/stage2_fill.yaml (this file plus
+# loss.empty). Several GPUs with 48 GB or more, two samples each.
 #
-#   torchrun --nproc_per_node=6 scripts/train.py --config configs/stage2_diffusion.yaml \
+#   torchrun --nproc_per_node=4 scripts/train.py --config configs/stage2_blank.yaml \
 #       --set run_dir=<dir> data.root=<processed root> data.chase_root=<render_targets output> \
 #             data.video_root=<make_video_frames output> model.weights_root=<weights dir> \
 #             model.stage1.head_checkpoint=<last.pt of the stage1_head run>
@@ -40,9 +41,14 @@ data:
   video_root: ${RV_VIDEO}
   train_logs: data_lists/av2_train_stage1.txt
   train_first: 150
-  eval_logs: null             # set to a list with chase targets and video frames to get sampled videos
+  eval_logs: data_lists/av2_val_dev10.txt   # needs their chase targets and video frames; null = no evaluation
+  eval_clips: 4               # two from the chase camera, two from real cameras
   clip_frames: 41
   size: [832, 480]
 
-loss: {w_min: 0.05, c_ref: 0.5}
+# empty: what to do where a chase image has no content. fill = no loss there (the model fills it in);
+# blank = supervised towards the background colour. configs/stage2_blank.yaml and stage2_fill.yaml are this
+# file with one or the other. The weight elsewhere follows soft_confidence; w_min 0 = only trusted places.
+# No content = rendered opacity below empty_alpha; not trusted = below alpha_min.
+loss: {empty: fill, confidence: soft, w_min: 0.0, c_ref: 0.5, alpha_min: 0.5, empty_alpha: 0.05}
 sample: {steps: 30, guidance: 3.0, shift: 5.0}

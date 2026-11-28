@@ -31,6 +31,12 @@ latent grid = target size / 8):
     tgt_clip_T_cam float32 (F, 4, 4)  target camera -> clip reference at the last frame of every latent frame
     tgt_time      float32 (F,)  time of those frames - time of the first clip frame, seconds
     conf          float32 (T, h, w)  confidence of the target in 0..1 (1 for photos)
+    empty         float32 (T, h, w)  share of the latent position where the chase image has no content
+                  (rendered opacity below ``empty_alpha``: the image shows the plain background colour
+                  there); 0 for photos. Pixels between ``empty_alpha`` and ``alpha_min`` are neither
+                  empty nor trusted: faint, half-transparent content.
+    context       uint8 (T, 3, Ht, Wt) RGB, only with ``with_context``: the photos of the front-center
+                  camera over the clip, to show next to the target (not an input of the model)
     supervise     float32 (h, w)  1 - share of the ego vehicle in the latent position
     kind          int64 ()  0 chase, 1 real;   tgt_cam  int64 () camera index or -1
     log_id, moment (first clip frame)
@@ -84,6 +90,16 @@ def soft_confidence(alpha: np.ndarray, visibility: np.ndarray, depth_consistency
     return np.where(alpha >= alpha_min, conf, 0.0).astype(np.float32)
 
 
+def product_confidence(alpha: np.ndarray, visibility: np.ndarray, depth_consistency: np.ndarray,
+                       alpha_min: float = 0.5) -> np.ndarray:
+    """The plain product alpha * V * D (what ``render_targets.py`` stores in conf/), 0 where alpha < alpha_min."""
+    conf = alpha * visibility * depth_consistency
+    return np.where(alpha >= alpha_min, conf, 0.0).astype(np.float32)
+
+
+CONFIDENCE = {"soft": soft_confidence, "product": product_confidence}
+
+
 def pool_to(x: np.ndarray, wh) -> np.ndarray:
     return cv2.resize(x.astype(np.float32), tuple(wh), interpolation=cv2.INTER_AREA)
 
@@ -99,11 +115,16 @@ class Stage2Dataset(Stage1Dataset):
         start_stride: use every n-th possible clip start
         kinds: "both" | "chase" | "real"
         alpha_min: confidence is 0 where the rendered opacity is below this
+        empty_alpha: a pixel counts as empty (background colour) where the rendered opacity is below this
+        confidence: "soft" (``soft_confidence``, the default) or "product" (alpha * V * D)
+        with_context: also return the front-center photos of the clip (needs ``video_root``); for pictures
     """
 
     def __init__(self, processed_root: str, split: str, log_ids, *, chase_root=None, video_root=None,
                  clip_frames: int = 41, cond_every_frames: int = 8, size=(832, 480), start_stride: int = 1,
-                 kinds: str = "both", alpha_min: float = 0.5, input_offsets=(0, -10), front_center_mode: str = "crop",
+                 kinds: str = "both", alpha_min: float = 0.5, empty_alpha: float = 0.05,
+                 confidence: str = "soft",
+                 with_context: bool = False, input_offsets=(0, -10), front_center_mode: str = "crop",
                  require_checks: bool = True, allow_missing_logs: bool = False):
         super().__init__(processed_root, split, log_ids, input_offsets=input_offsets,
                          front_center_mode=front_center_mode, require_checks=require_checks,
@@ -116,6 +137,12 @@ class Stage2Dataset(Stage1Dataset):
             raise ValueError("stage 2 needs one view per camera (front_center_mode 'crop' or 'letterbox')")
         if kinds not in ("both", "chase", "real"):
             raise ValueError("kinds must be both, chase or real")
+        if confidence not in CONFIDENCE:
+            raise ValueError(f"confidence must be one of {sorted(CONFIDENCE)}")
+        if with_context and not video_root:
+            raise ValueError("with_context needs video_root (the front-center photos are read from it)")
+        self.confidence = CONFIDENCE[confidence]
+        self.context_root = video_root if with_context else None
         self.chase_root = chase_root if kinds != "real" else None
         self.video_root = video_root if kinds != "chase" else None
         if self.chase_root is None and self.video_root is None:
@@ -127,6 +154,9 @@ class Stage2Dataset(Stage1Dataset):
         self.size = (int(size[0]), int(size[1]))
         self.latent_wh = (self.size[0] // 8, self.size[1] // 8)
         self.alpha_min = float(alpha_min)
+        self.empty_alpha = float(empty_alpha)
+        if not 0.0 < self.empty_alpha <= self.alpha_min:
+            raise ValueError("empty_alpha must be above 0 and not above alpha_min")
         self.variants = ([-1] * len(CAMS) if self.chase_root else []) + (list(range(len(CAMS))) if self.video_root else [])
         if self.chase_root and not self.video_root:
             self.variants = [-1]
@@ -145,8 +175,8 @@ class Stage2Dataset(Stage1Dataset):
                 rows = np.loadtxt(os.path.join(folder, "frames.tsv"), delimiter="\t", skiprows=1, usecols=(0, 1),
                                   dtype=np.int64, ndmin=2)
                 self.chase[li] = {"folder": folder, "camera": camera, "ts": {int(m): int(t) for m, t in rows}}
-            if self.video_root:
-                folder = os.path.join(self.video_root, split, log_id)
+            if self.video_root or self.context_root:
+                folder = os.path.join(self.video_root or self.context_root, split, log_id)
                 if not os.path.isfile(os.path.join(folder, "DONE")):
                     self.skipped[log_id] = "no video frames (run scripts/make_video_frames.py)"
                     self.chase.pop(li, None)
@@ -181,6 +211,7 @@ class Stage2Dataset(Stage1Dataset):
         ego_T_cam = np.array(cam["ego_T_cam"], np.float64)
         rgb = np.zeros((self.T, self.size[1], self.size[0], 3), np.uint8)
         conf = np.zeros((self.T, self.latent_wh[1], self.latent_wh[0]), np.float32)
+        empty = np.zeros_like(conf)
         city_T_cam, ts = [], []
         for n, i in enumerate(frames):
             t = info["ts"][i]
@@ -191,7 +222,8 @@ class Stage2Dataset(Stage1Dataset):
                 if x is None:
                     raise IOError(f"cannot read {info['folder']}/{sub}/{t}.png")
                 parts.append(x.astype(np.float32) / 255.0)
-            conf[n] = pool_to(fit_image(soft_confidence(*parts, alpha_min=self.alpha_min), self.size), self.latent_wh)
+            conf[n] = pool_to(fit_image(self.confidence(*parts, alpha_min=self.alpha_min), self.size), self.latent_wh)
+            empty[n] = pool_to(fit_image((parts[0] < self.empty_alpha).astype(np.float32), self.size), self.latent_wh)
             frame = int(L["moments"].iloc[i][f"idx_{FRONT_CENTER}"])
             city_T_cam.append(L["city_T_ego"][L["key"][(FRONT_CENTER, frame)]] @ ego_T_cam)
             ts.append(int(L["moments"].iloc[i][f"ts_{FRONT_CENTER}"]))
@@ -199,7 +231,16 @@ class Stage2Dataset(Stage1Dataset):
         if ego is None:
             raise IOError(f"cannot read {info['folder']}/ego_mask.png")
         ego = fit_image((ego > 0).astype(np.uint8), self.size, nearest=True)
-        return rgb, conf, ego, K, ego_T_cam, np.stack(city_T_cam), np.array(ts, np.int64)
+        return rgb, conf, empty, ego, K, ego_T_cam, np.stack(city_T_cam), np.array(ts, np.int64)
+
+    def _context(self, li, L, frames) -> np.ndarray:
+        """The front-center photos of the clip at the target size, (T, H, W, 3) RGB."""
+        folder = self.video[li]["folder"]
+        out = np.zeros((self.T, self.size[1], self.size[0], 3), np.uint8)
+        for n, i in enumerate(frames):
+            t = int(L["moments"].iloc[i][f"ts_{FRONT_CENTER}"])
+            out[n] = fit_image(self._read_rgb(os.path.join(folder, FRONT_CENTER, f"{t}.jpg")), self.size)[:, :, ::-1]
+        return out
 
     def _real_target(self, li, L, frames, cam: str):
         info = self.video[li]
@@ -219,7 +260,7 @@ class Stage2Dataset(Stage1Dataset):
             raise IOError(f"cannot read {info['folder']}/{cam}/ego_mask.png")
         ego = fit_image((ego > 0).astype(np.uint8), self.size, nearest=True)
         conf = np.ones((self.T, self.latent_wh[1], self.latent_wh[0]), np.float32)
-        return rgb, conf, ego, K, L["ego_T_cam"][cam], np.stack(city_T_cam), np.array(ts, np.int64)
+        return rgb, conf, np.zeros_like(conf), ego, K, L["ego_T_cam"][cam], np.stack(city_T_cam), np.array(ts, np.int64)
 
     # ------------------------------------------------------------------ sample
     def __getitem__(self, idx):
@@ -249,14 +290,18 @@ class Stage2Dataset(Stage1Dataset):
                                cam_id.shape).copy()
         frames = list(range(i0, i0 + self.T))
         if variant < 0:
-            rgb, conf, ego, K, ego_T_cam, city_T_cam, ts = self._chase_target(li, L, frames)
+            rgb, conf, empty, ego, K, ego_T_cam, city_T_cam, ts = self._chase_target(li, L, frames)
             view_valid = np.ones(n_views, bool)
         else:
-            rgb, conf, ego, K, ego_T_cam, city_T_cam, ts = self._real_target(li, L, frames, CAMS[variant])
+            rgb, conf, empty, ego, K, ego_T_cam, city_T_cam, ts = self._real_target(li, L, frames, CAMS[variant])
             view_valid = cam_id[0] != variant
             images = images * view_valid[None, :, None, None, None]
         latent_frames = np.arange(self.F) * 4                               # last frame of every latent frame
+        extra = {}
+        if self.context_root:
+            extra["context"] = torch.from_numpy(np.ascontiguousarray(self._context(li, L, frames).transpose(0, 3, 1, 2)))
         return {
+            **extra,
             "images": torch.from_numpy(np.ascontiguousarray(images)),
             "K": torch.from_numpy(np.stack(per["K"]).astype(np.float32)),
             "ref_T_cam": torch.from_numpy(np.stack(per["ref_T_cam"]).astype(np.float32)),
@@ -272,6 +317,7 @@ class Stage2Dataset(Stage1Dataset):
             "tgt_clip_T_cam": torch.from_numpy((cam_T_clip @ city_T_cam[latent_frames]).astype(np.float32)),
             "tgt_time": torch.from_numpy(((ts[latent_frames] - t0) / 1e9).astype(np.float32)),
             "conf": torch.from_numpy(conf),
+            "empty": torch.from_numpy(empty),
             "supervise": torch.from_numpy(1.0 - pool_to(ego, self.latent_wh)),
             "kind": torch.tensor(KIND_CHASE if variant < 0 else KIND_REAL, dtype=torch.int64),
             "tgt_cam": torch.tensor(variant, dtype=torch.int64),

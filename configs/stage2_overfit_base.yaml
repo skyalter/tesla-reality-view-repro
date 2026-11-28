@@ -20,6 +20,7 @@ model:
 
 data:
   train_first: null
+  eval_logs: null             # pass data.eval_logs=[<log id>] to get sampled videos
   eval_split: train           # the same log: this only asks whether the model can learn at all
   eval_clips: 2
   clip_frames: 33

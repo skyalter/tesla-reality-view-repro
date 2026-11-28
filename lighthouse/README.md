@@ -63,8 +63,23 @@ lighthouse/submit.sh train --hours 8     # 8 GPUs: train the backbone
 lighthouse/setup_head.sh                 # once: lpips and its VGG weights for the Gaussian head
 lighthouse/submit.sh head --hours 12     # 8 GPUs: train the Gaussian head on the trained backbone
 lighthouse/submit.sh targets --gpus 1 --hours 1 --name targets_preview -- --preview   # candidate chase cameras
-lighthouse/submit.sh targets -- --back 7 --up 4 --pitch 12 --hfov 70   # 8 GPUs: chase images of the training logs
+lighthouse/submit.sh targets              # 8 GPUs: chase images of the training logs (832x480, cleaned, fixed region)
+lighthouse/submit.sh targets --split val --gpus 2 --hours 2   # the same for the tuning logs
 ```
+
+Stage 2 (the diffusion model, two versions: `stage2_blank` and `stage2_fill`):
+
+```bash
+lighthouse/download_data.sh --only stage2   # once: the Wan2.1 1.3B weights (6.2 GB)
+lighthouse/submit.sh frames                 # CPU: photos of all cameras at 832x480, training and tuning logs
+lighthouse/submit.sh diffusion --config stage2_blank --gpus 1 --hours 2 --name stage2_smoke -- total_steps=100 stop_at_step=50   # try it; twice
+lighthouse/submit.sh diffusion --config stage2_blank --gpus 4   # train one version
+lighthouse/submit.sh diffusion --config stage2_fill --gpus 4    # and the other
+lighthouse/submit.sh sample --run stage2_blank                  # 1 GPU: videos of training and tuning logs
+```
+
+`targets` renders with the arguments in `RV_TARGET_ARGS` (default in `jobs/targets.sh`); arguments after `--`
+are added behind them and win, e.g. `-- --back 10 --up 6 --pitch 14`.
 
 A training job stops with a checkpoint 20 minutes before its time limit; submitting the same command
 again continues it. `touch $RV_SCRATCH/runs/<name>/STOP` stops it earlier without losing work.
@@ -76,11 +91,11 @@ rendered chase images are copied there through rclone; processed data stays on s
 | Script | What it does |
 |---|---|
 | `check_cluster.sh` | read-only report: nodes, GPU drivers, internet access, storage, existing data |
-| `download_data.sh` | downloads raw data and weights for stage 1 |
+| `download_data.sh` | downloads raw data and weights for stage 1; `--only stage2` the Wan2.1 weights |
 | `setup_env.sh` | creates the conda environment `realityview` from `requirements.txt` |
 | `test_env.sh` | checks the environment on a GPU node (runs `env_probe.py` through `srun`) |
 | `submit_test_env.sh` | the same check as a queued batch job |
 | `check_nas.sh` | checks that rclone can write to the place results are copied to |
 | `setup_head.sh` | adds what the Gaussian head needs: `lpips` and the VGG weights it loads |
-| `submit.sh` | submits a job: `preprocess`, `sky`, `baseline`, `train`, `head` or `targets` (bodies in `jobs/`) |
+| `submit.sh` | submits a job: `preprocess`, `sky`, `baseline`, `train`, `head`, `targets`, `frames`, `diffusion` or `sample` (bodies in `jobs/`) |
 | `common.sh` | shared settings, sourced by the others |

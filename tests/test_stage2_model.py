@@ -238,6 +238,73 @@ class TestScheduleAndLoss(unittest.TestCase):
         expect = (pred.detach().pow(2).mean(dim=1) * w).sum() / w.sum()
         self.assertAlmostEqual(float(per[0]), float(expect), places=6)
 
+    def test_blank_and_fill_differ_only_where_there_is_no_content(self):
+        # positions: trusted content | untrusted content | empty | half empty, half trusted | empty on the ego vehicle
+        conf = torch.tensor([1.0, 0.0, 0.0, 0.5, 0.0]).view(1, 1, 1, 5)
+        empty = torch.tensor([0.0, 0.0, 1.0, 0.5, 1.0]).view(1, 1, 1, 5)
+        supervise = torch.tensor([1.0, 1.0, 1.0, 1.0, 0.0]).view(1, 1, 1, 5)
+        fill = D.confidence_weight(conf, supervise, 0.0, 0.5, empty, "fill").flatten()
+        blank = D.confidence_weight(conf, supervise, 0.0, 0.5, empty, "blank").flatten()
+        self.assertEqual(fill.tolist(), [1.0, 0.0, 0.0, 0.5, 0.0])       # half empty: only the content half counts
+        self.assertEqual(blank.tolist(), [1.0, 0.0, 1.0, 1.0, 0.0])
+        # a photo (confidence 1, nothing empty) weighs the same in both
+        one, zero = torch.ones(1, 1, 2, 2), torch.zeros(1, 1, 2, 2)
+        for mode in D.EMPTY_MODES:
+            self.assertTrue(bool((D.confidence_weight(one, one, 0.0, 0.5, zero, mode) == 1).all()))
+        with self.assertRaises(ValueError):
+            D.confidence_weight(conf, supervise, 0.0, 0.5, empty, "other")
+        # "fill" with nothing trusted at all: the loss is 0 and finite, not NaN
+        pred = torch.randn(1, 3, 1, 1, 5, requires_grad=True)
+        w = D.confidence_weight(torch.zeros_like(conf), supervise, 0.0, 0.5, torch.ones_like(empty), "fill")
+        loss, _ = D.weighted_flow_loss(pred, torch.zeros_like(pred), w)
+        self.assertEqual(float(loss.detach()), 0.0)
+
+    def test_product_confidence(self):
+        a = np.array([[0.4, 0.8, 1.0]], np.float32)
+        v = np.array([[1.0, 0.5, 1.0]], np.float32)
+        d = np.array([[1.0, 0.5, 1.0]], np.float32)
+        np.testing.assert_allclose(SD.product_confidence(a, v, d), [[0.0, 0.2, 1.0]], atol=1e-6)
+        np.testing.assert_allclose(SD.soft_confidence(a, v, d), [[0.0, 0.8 * np.sqrt(0.5), 1.0]], atol=1e-6)
+
+    def test_picture_metrics(self):
+        from realityview.tasks.stage2_diffusion import picture_metrics, to_pixels
+
+        T, H, W = 5, 16, 32
+        self.assertEqual(tuple(to_pixels(torch.ones(2, 4), T, (H, W)).shape), (T, H, W))
+        target = torch.full((T, 3, H, W), 109, dtype=torch.uint8)
+        target[:, :, :, :16] = 200                                  # content on the left, background on the right
+        conf = torch.zeros(T, 2, 4)
+        conf[:, :, :2] = 1.0
+        empty = 1.0 - conf
+        supervise = torch.ones(2, 4)
+        supervise[1, 0] = 0.0                                       # the ego vehicle, on the content side
+        same = picture_metrics(target, target, conf, empty, supervise, True)
+        self.assertGreater(same["psnr"], 60.0)
+        self.assertEqual(same["empty_dist"], 0.0)
+        self.assertAlmostEqual(same["empty_share"], 0.5)
+        self.assertEqual(same["background"], [109.0, 109.0, 109.0])
+        drawn = target.clone()
+        drawn[:, :, :, 16:] = 149                                   # something drawn where the target is blank
+        self.assertAlmostEqual(picture_metrics(drawn, target, conf, empty, supervise, True)["empty_dist"], 40.0, places=4)
+        self.assertGreater(picture_metrics(drawn, target, conf, empty, supervise, True)["psnr"], 60.0)
+        wrong = target.clone()
+        wrong[:, :, 8:, :8] = 0                                     # an error under the ego vehicle only
+        self.assertGreater(picture_metrics(wrong, target, conf, empty, supervise, True)["psnr"], 60.0)
+        self.assertGreater(picture_metrics(wrong, target, torch.ones_like(conf), torch.zeros_like(conf), supervise, False)["psnr"], 60.0)
+        real = picture_metrics(drawn, target, torch.ones_like(conf), torch.zeros_like(conf), supervise, False)
+        self.assertEqual(set(real), {"psnr"})
+        self.assertLess(real["psnr"], 30.0)
+
+    def test_evaluation_clips_take_both_kinds_in_turn(self):
+        from realityview.tasks.stage2_diffusion import Stage2DiffusionTask
+
+        both = [-1] * 7 + list(range(7))
+        chosen = Stage2DiffusionTask.eval_choice(both, [10, 20, 30, 40])
+        self.assertEqual([c // 14 for c in chosen], [10, 20, 30, 40])
+        self.assertEqual([both[c % 14] for c in chosen], [-1, 0, -1, 1])
+        self.assertEqual(Stage2DiffusionTask.eval_choice([-1], [3, 4]), [3, 4])
+        self.assertEqual([c % 7 for c in Stage2DiffusionTask.eval_choice(list(range(7)), [0, 1, 2])], [0, 1, 2])
+
     def test_soft_confidence_is_the_renderer_formula(self):
         try:
             from realityview.render.targets import soft_confidence
@@ -306,6 +373,58 @@ class TestStage2Model(unittest.TestCase):
         lat = model.sample(batch, 9, (32, 64), steps=2, guidance=2.0, generator=torch.Generator().manual_seed(0))
         self.assertEqual(tuple(lat.shape), (1, 16, 3, 4, 8))
         self.assertEqual(tuple(model.decode(lat).shape), (1, 9, 3, 32, 64))
+
+    def test_evaluation_keeps_chase_and_real_apart(self):
+        import os
+        import tempfile
+
+        from realityview.tasks.stage2_diffusion import Stage2DiffusionTask
+
+        def clip(kind):
+            b = batch_of(B=1)
+            T, (h, w) = 9, (4, 8)
+            conf = torch.ones(1, T, h, w)
+            empty = torch.zeros(1, T, h, w)
+            if kind == 0:
+                conf[..., 4:] = 0.0
+                empty[..., 4:] = 1.0
+                b["target"][..., 32:] = 109
+            b.update(conf=conf, empty=empty, supervise=torch.ones(1, h, w), kind=torch.tensor([kind]),
+                     tgt_cam=torch.tensor([-1 if kind == 0 else 2]), log_id=["abcdefgh-0000"], moment=torch.tensor([7]),
+                     context=b["target"].clone())
+            return b
+
+        model = tiny_model().eval()
+        with tempfile.TemporaryDirectory() as tmp:
+            numbers = {}
+            for mode in ("blank", "fill"):
+                task = Stage2DiffusionTask({"run_dir": os.path.join(tmp, mode), "data": {"root": "unused"},
+                                            "model": {"dit": "tiny"}, "loss": {"empty": mode},
+                                            "sample": {"steps": 2}})
+                task.step = 5
+                numbers[mode] = task.evaluate(model, [clip(0), clip(1)], torch.device("cpu"))
+                for name, cam in (("chase", "chase"), ("real", "ring_front_right")):
+                    folder = os.path.join(tmp, mode, "samples", "step_00000005", name)
+                    files = sorted(os.listdir(folder))
+                    self.assertEqual(len(files), 2, files)
+                    self.assertTrue(all(cam in f for f in files), files)
+                    self.assertTrue(any(f.endswith(".jpg") for f in files), files)
+            keys = {"loss", "loss_chase", "loss_real", "psnr_chase", "psnr_real", "empty_dist", "empty_share"}
+            self.assertEqual(set(numbers["blank"]), keys)
+            self.assertAlmostEqual(numbers["blank"]["empty_share"], 0.5)
+            # the evaluation losses use the same weights in both versions, so that the two can be compared;
+            # the training weights differ on the chase clip (its empty half counts or not), not on the photo
+            for key in ("loss_real", "loss_chase", "loss"):
+                self.assertAlmostEqual(numbers["blank"][key], numbers["fill"][key], places=5)
+            chase, photo = clip(0), clip(1)
+            weights = {mode: Stage2DiffusionTask({"data": {"root": "unused"}, "model": {"dit": "tiny"},
+                                                  "loss": {"empty": mode}}) for mode in ("blank", "fill")}
+            self.assertEqual(float(weights["blank"].loss_weight(chase).mean()), 1.0)
+            self.assertEqual(float(weights["fill"].loss_weight(chase).mean()), 0.5)
+            self.assertEqual(float(weights["blank"].loss_weight(chase, "fill").mean()), 0.5)
+            self.assertTrue(torch.equal(weights["blank"].loss_weight(photo), weights["fill"].loss_weight(photo)))
+        with self.assertRaises(ValueError):
+            Stage2DiffusionTask({"data": {"root": "unused"}, "model": {"dit": "tiny"}, "loss": {"empty": "other"}})
 
     def test_moment_of_frame(self):
         model = tiny_model(cond_every=2)

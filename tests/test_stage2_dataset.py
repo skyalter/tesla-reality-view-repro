@@ -66,6 +66,8 @@ class Stage2DatasetRealData(unittest.TestCase):
         self.assertEqual(str(s["target"].dtype), "torch.uint8")
         self.assertEqual(tuple(s["conf"].shape), (FRAMES, SIZE[1] // 8, SIZE[0] // 8))
         self.assertEqual(tuple(s["supervise"].shape), (SIZE[1] // 8, SIZE[0] // 8))
+        self.assertEqual(tuple(s["empty"].shape), tuple(s["conf"].shape))
+        self.assertNotIn("context", s)
         self.assertEqual(tuple(s["tgt_clip_T_cam"].shape), (F, 4, 4))
         for key in ("K", "ref_T_cam", "clip_T_cam"):
             self.assertEqual(tuple(s[key].shape[:2]), (M, N), key)
@@ -92,6 +94,15 @@ class Stage2DatasetRealData(unittest.TestCase):
         conf = s["conf"].numpy()
         self.assertTrue(conf.min() >= 0.0 and conf.max() <= 1.0)
         self.assertGreater(conf.mean(), 0.01)
+        # no content = rendered opacity below 0.05; the confidence is 0 there (it is 0 below 0.5), so a latent
+        # position is never more than (1 - its empty share) confident
+        alpha = cv2.imread(os.path.join(folder, "alpha", f"{t}.png"), cv2.IMREAD_GRAYSCALE).astype(np.float32) / 255.0
+        hollow = cv2.resize(fit_image((alpha < 0.05).astype(np.float32), SIZE), (SIZE[0] // 8, SIZE[1] // 8),
+                            interpolation=cv2.INTER_AREA)
+        empty = s["empty"].numpy()
+        np.testing.assert_allclose(empty[0], hollow, atol=1e-6)
+        self.assertTrue(empty.min() >= 0.0 and empty.max() <= 1.0)
+        self.assertTrue(bool((conf <= 1.0 - empty + 1e-5).all()))
         sup = s["supervise"].numpy()
         self.assertTrue(sup.min() >= 0.0 and sup.max() == 1.0)
         self.assertLess(sup.min(), 1.0, "the ego vehicle should hide part of the chase picture")
@@ -113,6 +124,7 @@ class Stage2DatasetRealData(unittest.TestCase):
         self.assertEqual(int(s["images"][:, ~valid].abs().sum()), 0)
         self.assertGreater(int(s["images"][:, valid].abs().sum()), 0)
         self.assertEqual(float(s["conf"].min()), 1.0)
+        self.assertEqual(float(s["empty"].abs().max()), 0.0)
         li, i0 = self.ds.starts[self.start]
         L = self.ds._log(li)
         t = int(L["moments"].iloc[i0][f"ts_{FRONT_CENTER}"])
@@ -125,6 +137,34 @@ class Stage2DatasetRealData(unittest.TestCase):
         # later frames: the vehicle has not jumped (under 40 m/s)
         shift = np.linalg.norm(s["tgt_clip_T_cam"][-1, :3, 3].numpy())
         self.assertLess(shift, 40.0 * (FRAMES - 1) / 20.0)
+
+    def test_context_and_confidence_options(self):
+        from realityview.data.stage2_dataset import Stage2Dataset, fit_image
+
+        root = _util.processed_root()
+        kw = dict(clip_frames=FRAMES, cond_every_frames=8, size=SIZE)
+        # the chase camera alone, with the front-center photos next to it
+        ds = Stage2Dataset(root, self.split, [self.log_id], chase_root=self.chase_root, video_root=self.video_root,
+                           kinds="chase", with_context=True, **kw)
+        self.assertEqual(ds.variants, [-1])
+        s = ds[self.start]
+        self.assertEqual(tuple(s["context"].shape), tuple(s["target"].shape))
+        li, i0 = ds.starts[self.start]
+        t = int(ds._log(li)["moments"].iloc[i0][f"ts_{FRONT_CENTER}"])
+        img = cv2.imread(os.path.join(self.video_root, self.split, self.log_id, FRONT_CENTER, f"{t}.jpg"))
+        np.testing.assert_array_equal(s["context"][0].permute(1, 2, 0).numpy(), fit_image(img, SIZE)[:, :, ::-1])
+        ref = self.sample(-1)
+        np.testing.assert_array_equal(s["target"].numpy(), ref["target"].numpy())
+        np.testing.assert_array_equal(s["images"].numpy(), ref["images"].numpy())
+        with self.assertRaises(ValueError):
+            Stage2Dataset(root, self.split, [self.log_id], chase_root=self.chase_root, kinds="chase", with_context=True, **kw)
+        # the plain product is never above the soft confidence, and both are 0 on the same empty places
+        product = Stage2Dataset(root, self.split, [self.log_id], chase_root=self.chase_root, kinds="chase",
+                                confidence="product", **kw)[self.start]
+        self.assertTrue(bool((product["conf"] <= ref["conf"] + 1e-6).all()))
+        np.testing.assert_array_equal(product["empty"].numpy(), ref["empty"].numpy())
+        with self.assertRaises(ValueError):
+            Stage2Dataset(root, self.split, [self.log_id], chase_root=self.chase_root, confidence="other", **kw)
 
     def test_same_inputs_for_both_kinds(self):
         a, b = self.sample(-1), self.sample(0)

@@ -6,6 +6,7 @@ also taken with a single process when it comes from torchrun, so it can be exerc
 """
 from __future__ import annotations
 
+import datetime
 import os
 from dataclasses import dataclass
 
@@ -44,10 +45,13 @@ def setup(device: str = "auto", backend: str = "auto") -> ProcessInfo:
         device_obj = torch.device("cpu")
     if not torch_dist.is_initialized():
         name = ("nccl" if use_cuda else "gloo") if backend == "auto" else backend
+        # The main process evaluates and writes checkpoints while the others wait in a collective call:
+        # the default limit of 10 minutes for such a call is too short for a long evaluation.
+        timeout = datetime.timedelta(hours=2)
         try:
-            torch_dist.init_process_group(name, device_id=device_obj if use_cuda else None)
+            torch_dist.init_process_group(name, timeout=timeout, device_id=device_obj if use_cuda else None)
         except TypeError:           # PyTorch versions without the device_id argument
-            torch_dist.init_process_group(name)
+            torch_dist.init_process_group(name, timeout=timeout)
     return ProcessInfo(rank, world, device_obj, True)
 
 

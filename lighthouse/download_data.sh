@@ -4,11 +4,13 @@
 # connection. Safe to re-run: finished parts are skipped, interrupted parts resume.
 # Needs only s5cmd and python3 (3.8 or newer) on PATH; no conda environment.
 #
-# Usage: lighthouse/download_data.sh [--dry-run] [--only train|val|weights] [--workers N]
+# Usage: lighthouse/download_data.sh [--dry-run] [--only train|val|weights|stage2] [--workers N]
 #
 #   train    logs listed in data_lists/av2_train_stage1.txt, without the stereo cameras
 #   val      the reporting logs (complete) and the tuning logs (without the stereo cameras)
 #   weights  pretrained weights, pinned to exact revisions and verified by SHA-256
+#   stage2   the Wan2.1 1.3B weights of the stage-2 diffusion model (6.2 GB, from Hugging Face
+#            Wan-AI/Wan2.1-T2V-1.3B, Apache-2.0); only with --only stage2, not part of a run without --only
 #
 # Where things go (RV_SCRATCH comes from lighthouse/local.env):
 #   raw logs:  $RV_SCRATCH/raw/argoverse2_sensor/<split>/<log_id>/...   (or $RV_RAW if it is set)
@@ -25,20 +27,23 @@ while [ $# -gt 0 ]; do
     --dry-run) EXTRA+=(--dry-run); shift ;;
     --only) ONLY="$2"; shift 2 ;;
     --workers) WORKERS="$2"; shift 2 ;;
-    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-case "$ONLY" in ""|train|val|weights) ;; *) echo "--only must be train, val or weights" >&2; exit 2 ;; esac
+case "$ONLY" in ""|train|val|weights|stage2) ;; *) echo "--only must be train, val, weights or stage2" >&2; exit 2 ;; esac
 
+want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 export S5CMD="${S5CMD:-$(command -v s5cmd || true)}"
-[ -x "$S5CMD" ] || { echo "s5cmd is not on PATH: install it (https://github.com/peak/s5cmd) or set S5CMD to its path" >&2; exit 2; }
+if want train || want val; then     # the weights come over HTTPS and need no s5cmd
+  [ -x "$S5CMD" ] || { echo "s5cmd is not on PATH: install it (https://github.com/peak/s5cmd) or set S5CMD to its path" >&2; exit 2; }
+fi
 PYTHON="$(command -v python3 || true)"
 [ -n "$PYTHON" ] && "$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 8))' || { echo "python3 3.8 or newer is needed on PATH" >&2; exit 2; }
-echo "s5cmd: $S5CMD ($("$S5CMD" version))   python: $("$PYTHON" --version 2>&1)"
+[ ! -x "$S5CMD" ] || echo "s5cmd: $S5CMD ($("$S5CMD" version))"
+echo "python: $("$PYTHON" --version 2>&1)"
 LISTS="$REPO_DIR/data_lists"
 AV2="$REPO_DIR/scripts/av2_download.sh"
-want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 status=0
 
 echo "raw data -> $RV_RAW"
@@ -67,6 +72,11 @@ fi
 if want weights; then
   echo "== pretrained weights"
   "$PYTHON" "$REPO_DIR/scripts/download_weights.py" --dest "$RV_WEIGHTS" --set stage1 ${EXTRA[@]+"${EXTRA[@]}"} || status=1
+fi
+
+if [ "$ONLY" = stage2 ]; then
+  echo "== weights of the stage-2 diffusion model"
+  "$PYTHON" "$REPO_DIR/scripts/download_weights.py" --dest "$RV_WEIGHTS" --set stage2 ${EXTRA[@]+"${EXTRA[@]}"} || status=1
 fi
 
 if [ "$status" = 0 ]; then echo "all requested parts are complete"; else echo "something is incomplete; read the messages above and run again" >&2; fi

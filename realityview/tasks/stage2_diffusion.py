@@ -10,8 +10,15 @@
 What trains (``model.scope``): the new modules (conditioner, feature cross-attention) and, by default, the
 self-attention of the diffusion backbone; "adapters" trains the new modules only, "full" everything.
 
-Evaluation: on a few fixed clips, the loss at three fixed noise levels and a sampled video next to its
-target, written to <run_dir>/samples/step_<n>/.
+The chase images have no content outside the region kept by the renderer (they show the background colour
+there). ``loss.empty`` says what the model is asked to do with these places: "blank" = draw the background
+colour (they are supervised), "fill" = no loss there, the model fills them in by itself.
+
+Evaluation: on a few fixed clips, half from the chase camera and half from real cameras (the control: a
+real camera is removed from the inputs and drawn from the others), the loss at three fixed noise levels and
+a sampled video. Numbers and pictures are kept apart for the two kinds: <run_dir>/samples/step_<n>/chase/
+and .../real/ hold, per clip, an .mp4 and a .jpg sheet of four frames with the panels
+[front-center photo | target | sample] (the photo only when the video frames are there).
 """
 from __future__ import annotations
 
@@ -22,6 +29,7 @@ import numpy as np
 import torch
 from torch.utils.data import Subset
 
+from ..data.config import CAMS
 from ..engine.config import merge
 from ..losses import diffusion as D
 from ..models.diffusion import schedule
@@ -69,7 +77,14 @@ DEFAULTS = {
         "front_center_mode": "crop",
         "retries": 3,
     },
-    "loss": {"w_min": 0.05, "c_ref": 0.5, "alpha_min": 0.5},
+    "loss": {
+        "empty": "fill",        # blank | fill: places of a chase image without content (see the module text)
+        "confidence": "soft",   # soft (soft_confidence, the default) | product (alpha * V * D)
+        "w_min": 0.0,           # weight floor everywhere on a chase image; 0 = only trusted places count
+        "c_ref": 0.5,           # confidence at which the weight reaches 1
+        "alpha_min": 0.5,       # rendered opacity below this = not trusted (confidence 0)
+        "empty_alpha": 0.05,    # rendered opacity below this = no content (the plain background colour)
+    },
     "sample": {"steps": 30, "guidance": 3.0, "shift": 5.0, "enabled": True},
 }
 
@@ -86,10 +101,60 @@ def write_video(path: str, frames: np.ndarray, fps: int = 20) -> str:
 
         pick = np.linspace(0, len(frames) - 1, 6).round().astype(int)
         sheet = np.concatenate([frames[i] for i in pick], axis=1)
-        alt = os.path.splitext(path)[0] + ".jpg"
+        alt = os.path.splitext(path)[0] + "_strip.jpg"       # not <name>.jpg: that is the sheet of write_sheet
         cv2.imwrite(alt, sheet[:, :, ::-1])
         print(f"WARNING: no video written ({error!r}); frame sheet {alt}", flush=True)
         return alt
+
+
+def write_sheet(path: str, frames: np.ndarray, n: int = 4) -> str:
+    """frames (T, H, W, 3) uint8 RGB -> a .jpg with ``n`` frames spread over the clip, one below the other."""
+    import cv2
+
+    pick = np.linspace(0, len(frames) - 1, n).round().astype(int)
+    cv2.imwrite(path, np.concatenate([frames[i] for i in pick], axis=0)[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 90])
+    return path
+
+
+def to_pixels(x: torch.Tensor, n_frames: int, hw) -> torch.Tensor:
+    """A map on the latent grid, (T, h, w) per frame or (h, w) for all frames, -> (T, H, W) (nearest)."""
+    if x.dim() == 2:
+        x = x[None].expand(n_frames, -1, -1)
+    return torch.nn.functional.interpolate(x[:, None].float(), size=tuple(hw), mode="nearest")[:, 0]
+
+
+def picture_metrics(video: torch.Tensor, target: torch.Tensor, conf: torch.Tensor, empty: torch.Tensor,
+                    supervise: torch.Tensor, chase: bool, c_ref: float = 0.5) -> dict:
+    """Numbers of one sampled clip against its target, in pixels.
+
+        video, target  (T, 3, H, W) uint8
+        conf, empty    (T, h, w) on the latent grid, per frame (as the dataset gives them)
+        supervise      (h, w)
+    Real camera: psnr over everything but the ego vehicle.
+    Chase camera: psnr over the trusted places (confidence >= ``c_ref``); ``empty_share`` = share of the
+    picture without content; ``empty_dist`` = mean absolute difference, in grey levels of 255, between the
+    sample and the background colour there (the median colour of the target in these places): near 0 when
+    the model leaves them blank, large when it draws something."""
+    T, _, H, W = target.shape
+    keep = to_pixels(supervise, T, (H, W)) > 0.999
+    v, t = video.float(), target.float()
+    err = (v - t).pow(2).mean(dim=1)                                    # (T, H, W)
+
+    def psnr(mask):
+        return float(10.0 * torch.log10(255.0 ** 2 / err[mask].mean().clamp(min=1e-6))) if bool(mask.any()) else None
+
+    if not chase:
+        out = {"psnr": psnr(keep)}
+    else:
+        trusted = keep & (to_pixels(conf, T, (H, W)) >= c_ref)
+        blank = keep & (to_pixels(empty, T, (H, W)) > 0.999)
+        out = {"psnr": psnr(trusted), "empty_share": float(blank.float().mean())}
+        if bool(blank.any()):
+            where = blank[:, None].expand(-1, 3, -1, -1)
+            colour = torch.stack([t[:, c][blank].median() for c in range(3)])
+            out["empty_dist"] = float((v - colour[None, :, None, None]).abs()[where].mean())
+            out["background"] = [round(float(c), 1) for c in colour]
+    return {k: x for k, x in out.items() if x is not None}
 
 
 class Stage2DiffusionTask:
@@ -99,6 +164,8 @@ class Stage2DiffusionTask:
         self.d = merge(DEFAULTS["data"], cfg.get("data") or {})
         self.l = merge(DEFAULTS["loss"], cfg.get("loss") or {})
         self.s = merge(DEFAULTS["sample"], cfg.get("sample") or {})
+        if self.l["empty"] not in D.EMPTY_MODES:
+            raise ValueError(f"loss.empty must be one of {D.EMPTY_MODES}, not {self.l['empty']!r}")
         if not self.d["root"]:
             raise ValueError("data.root is not set")
         if self.m["dit"] != "tiny" and not self.m["weights_root"]:
@@ -169,6 +236,7 @@ class Stage2DiffusionTask:
         args = dict(chase_root=d["chase_root"], video_root=d["video_root"], clip_frames=d["clip_frames"],
                     cond_every_frames=4 * int(self.m["cond_every"]), size=tuple(d["size"]),
                     start_stride=d["start_stride"], kinds=d["kinds"], alpha_min=self.l["alpha_min"],
+                    empty_alpha=self.l["empty_alpha"], confidence=self.l["confidence"],
                     input_offsets=tuple(d["input_offsets"]), front_center_mode=d["front_center_mode"])
         args.update(over)
         return Stage2Dataset(d["root"], split, logs, **args)
@@ -190,15 +258,31 @@ class Stage2DiffusionTask:
     def build_eval_dataset(self):
         if not self.d["eval_logs"]:
             return None
-        dataset = self._dataset(self.d["eval_split"], self.eval_logs(), start_stride=1)
+        dataset = self._dataset(self.d["eval_split"], self.eval_logs(), start_stride=1,
+                                with_context=bool(self.d["video_root"]))
         if dataset.skipped:
             raise RuntimeError(f"evaluation logs that are not ready: {dataset.skipped}")
-        n_var = len(dataset.variants)
+        if not dataset.starts:
+            raise RuntimeError("no evaluation clips: are the chase targets and the video frames complete?")
         n = max(1, int(self.d["eval_clips"]))
         starts = np.linspace(0, len(dataset.starts) - 1, n + 2)[1:-1].round().astype(int)
-        # alternate: the chase camera (variant 0) and a real camera (the last variant) when both exist
-        chosen = [int(s) * n_var + (0 if k % 2 == 0 else n_var - 1) for k, s in enumerate(starts)]
-        return Subset(dataset, chosen)
+        return Subset(dataset, self.eval_choice(dataset.variants, starts))
+
+    @staticmethod
+    def eval_choice(variants: list, starts) -> list:
+        """Sample indices of the evaluation clips: the chase camera and a real camera in turn when both
+        exist (the real camera changes from clip to clip), otherwise the first variant."""
+        n_var = len(variants)
+        real = [k for k, v in enumerate(variants) if v >= 0]
+        chase = [k for k, v in enumerate(variants) if v < 0]
+        chosen = []
+        for k, s in enumerate(starts):
+            if chase and real:
+                variant = chase[0] if k % 2 == 0 else real[(k // 2) % len(real)]
+            else:
+                variant = (real[(k) % len(real)] if real else chase[0])
+            chosen.append(int(s) * n_var + variant)
+        return chosen
 
     def checkpoint_extra(self) -> dict:
         def digest(ids):
@@ -209,10 +293,12 @@ class Stage2DiffusionTask:
                                "train_sha256": digest(train)}, "stage1": self.stage1_info}
 
     # ------------------------------------------------------------------ training
-    def loss_weight(self, batch) -> torch.Tensor:
+    def loss_weight(self, batch, empty_mode: str | None = None) -> torch.Tensor:
+        """The weight of every latent position; ``empty_mode`` None = that of the run (``loss.empty``)."""
         conf = D.temporal_pool(batch["conf"].float())
         supervise = batch["supervise"].float()[:, None].expand_as(conf)
-        return D.confidence_weight(conf, supervise, self.l["w_min"], self.l["c_ref"])
+        empty = D.temporal_pool(batch["empty"].float()) if "empty" in batch else None
+        return D.confidence_weight(conf, supervise, self.l["w_min"], self.l["c_ref"], empty, empty_mode or self.l["empty"])
 
     def training_step(self, model, batch, step):
         B = batch["images"].shape[0]
@@ -227,6 +313,7 @@ class Stage2DiffusionTask:
             pick = batch["kind"] == kind
             if bool(pick.any()):
                 logs[f"loss_{name}"] = float(per[pick].mean())
+                logs[f"weight_{name}"] = float(weight[pick].mean())
         self.step = step + 1
         return loss, logs
 
@@ -236,33 +323,56 @@ class Stage2DiffusionTask:
 
     @torch.no_grad()
     def evaluate(self, model, loader, device) -> dict:
+        """One clip at a time (the trainer's ``eval_batch_size`` 1). Keys: loss, loss_chase, loss_real;
+        with sampling also psnr_chase (trusted places), psnr_real, empty_dist and empty_share (chase).
+
+        The losses here always use the "fill" weights (trusted places only), whatever ``loss.empty`` is,
+        so that they mean the same in a "blank" and in a "fill" run and can be compared between them."""
         sums, counts = {}, {}
+
+        def add(key, value):
+            sums[key] = sums.get(key, 0.0) + float(value)
+            counts[key] = counts.get(key, 0) + 1
+
         out_dir = os.path.join(self.run_dir, "samples", f"step_{self.step:08d}") if self.run_dir else None
         for n, batch in enumerate(loader):
             batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+            if batch["images"].shape[0] != 1:
+                raise ValueError("stage-2 evaluation takes one clip at a time (eval_batch_size: 1)")
             gen = torch.Generator().manual_seed(1000 + n)
             latents = model.latents_of(batch)
             batch_l = {**batch, "latents": latents}
-            weight = self.loss_weight(batch)
+            weight = self.loss_weight(batch, "fill")
             noise = torch.randn(latents.shape, generator=gen).to(device)
-            name = "chase" if int(batch["kind"][0]) == 0 else "real"
+            chase = int(batch["kind"][0]) == 0
+            name = "chase" if chase else "real"
             for s in (0.3, 0.6, 0.9):
                 sigma = torch.full((latents.shape[0],), s, device=device)
                 out = model(batch_l, sigma, noise)
                 _, per = D.weighted_flow_loss(out["pred"], out["target"], weight)
-                for key in ("loss", f"loss_{name}"):
-                    sums[key] = sums.get(key, 0.0) + float(per.mean())
-                    counts[key] = counts.get(key, 0) + 1
+                add("loss", per.mean())
+                add(f"loss_{name}", per.mean())
             if out_dir and self.s["enabled"]:
                 T = batch["target"].shape[1]
                 hw = tuple(batch["target"].shape[-2:])
                 lat = model.sample(batch, T, hw, steps=self.s["steps"], guidance=self.s["guidance"],
                                    shift=self.s["shift"], noise=torch.randn(latents.shape, generator=gen))
-                video = model.decode(lat)[0].permute(0, 2, 3, 1).cpu().numpy()
-                target = batch["target"][0].permute(0, 2, 3, 1).cpu().numpy()
-                os.makedirs(out_dir, exist_ok=True)
-                tag = f"{n:02d}_{name}_{str(batch['log_id'][0])[:8]}_{int(batch['moment'][0])}"
-                write_video(os.path.join(out_dir, tag + ".mp4"), np.concatenate([target, video], axis=2))
+                video = model.decode(lat)[0]
+                numbers = picture_metrics(video, batch["target"][0], batch["conf"][0], batch["empty"][0],
+                                          batch["supervise"][0], chase, self.l["c_ref"])
+                for key, value in numbers.items():
+                    if key == "background":
+                        continue
+                    add(key if key.startswith("empty") else f"{key}_{name}", value)
+                panels = [batch["context"][0]] if "context" in batch else []
+                panels += [batch["target"][0], video]
+                frames = np.concatenate([p.permute(0, 2, 3, 1).cpu().numpy() for p in panels], axis=2)
+                folder = os.path.join(out_dir, name)
+                os.makedirs(folder, exist_ok=True)
+                cam = "chase" if chase else CAMS[int(batch["tgt_cam"][0])]
+                tag = f"{n:02d}_{cam}_{str(batch['log_id'][0])[:8]}_{int(batch['moment'][0]):04d}"
+                write_video(os.path.join(folder, tag + ".mp4"), frames)
+                write_sheet(os.path.join(folder, tag + ".jpg"), frames)
         return {k: sums[k] / counts[k] for k in sorted(sums)}
 
 

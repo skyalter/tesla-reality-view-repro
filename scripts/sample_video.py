@@ -13,10 +13,15 @@ the camera and the picture to compare with); for a real camera (``--camera``) th
 scripts/make_video_frames.py instead.
 
 Output, per clip, in <out>/:
-    <log>_<moment>_<camera>.mp4     the target on the left, the sample on the right (``--no-target``: the
-                                    sample alone); for the chase camera the ego vehicle is laid over both
-                                    when the chase folder has ego_overlay.png (``--no-ego`` turns it off)
-    samples_<camera>.json           what was sampled and with which settings
+    <log>_<moment>_<camera>.mp4     panels from left to right: the front-center photo (only when
+                                    data.video_root is set; ``--no-context`` leaves it out), the target
+                                    (``--no-target`` leaves it out), the sample; for the chase camera the
+                                    ego vehicle is laid over target and sample when the chase folder has
+                                    ego_overlay.png (``--no-ego`` turns it off)
+    <log>_<moment>_<camera>.jpg     four frames of the same, one below the other
+    samples_<camera>.json           what was sampled, with which settings, and the numbers of every clip
+                                    (``picture_metrics`` in realityview/tasks/stage2_diffusion.py) and
+                                    their means
 """
 from __future__ import annotations
 
@@ -68,9 +73,11 @@ def main() -> int:
     ap.add_argument("--shift", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-target", action="store_true")
+    ap.add_argument("--no-context", action="store_true", help="no front-center photo panel")
     ap.add_argument("--no-ego", action="store_true")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE", help="replace values of the stored configuration")
+    ap.add_argument("--set", nargs="*", action="extend", default=[], metavar="KEY=VALUE",
+                    help="replace values of the stored configuration (may be given several times; a later one wins)")
     args = ap.parse_args()
 
     from torch.utils.data import default_collate
@@ -79,7 +86,7 @@ def main() -> int:
     from realityview.engine.config import apply_overrides
     from realityview.engine.trainer import to_device
     from realityview.tasks.stage1_backbone import REPO, read_logs
-    from realityview.tasks.stage2_diffusion import load_trained_model, write_video
+    from realityview.tasks.stage2_diffusion import load_trained_model, picture_metrics, write_sheet, write_video
 
     chase = args.camera == "chase"
     if not chase and args.camera not in CAMS:
@@ -96,7 +103,8 @@ def main() -> int:
     need = "data.chase_root" if chase else "data.video_root"
     if not d[need.split(".")[1]]:
         ap.error(f"{need} is not set (pass it with --set)")
-    dataset = task._dataset(split, logs, start_stride=1, kinds="chase" if chase else "real")
+    dataset = task._dataset(split, logs, start_stride=1, kinds="chase" if chase else "real",
+                            with_context=bool(d["video_root"]) and not args.no_context)
     if dataset.skipped:
         print(f"logs that are not ready, left out: {dataset.skipped}", flush=True)
     if not dataset.starts:
@@ -107,6 +115,9 @@ def main() -> int:
     else:
         n = max(1, min(args.clips, len(dataset.starts)))
         starts = np.linspace(0, len(dataset.starts) - 1, n + 2)[1:-1].round().astype(int).tolist()
+    if not starts:
+        raise SystemExit(f"no clip to sample: --starts must be within 0..{len(dataset.starts) - 1}")
+    has_context = dataset.context_root is not None
     s = task.s
     steps = args.steps or int(s["steps"])
     guidance = float(s["guidance"]) if args.guidance is None else args.guidance
@@ -124,23 +135,36 @@ def main() -> int:
         gen = torch.Generator().manual_seed(args.seed + k)
         t0 = time.time()
         latents = model.sample(batch, T, hw, steps=steps, guidance=guidance, shift=shift, generator=gen)
-        video = model.decode(latents)[0].permute(0, 2, 3, 1).cpu().numpy()
+        decoded = model.decode(latents)[0]
+        video = decoded.permute(0, 2, 3, 1).cpu().numpy()
         seconds = time.time() - t0
+        numbers = picture_metrics(decoded, target[0], batch["conf"][0], batch["empty"][0],
+                                  batch["supervise"][0], chase, task.l["c_ref"])
         truth = target[0].permute(0, 2, 3, 1).cpu().numpy()
         li, i0 = dataset.starts[int(start)]
         if chase and not args.no_ego:
             overlay = read_overlay(dataset.chase[li]["folder"], (hw[1], hw[0]))
             if overlay is not None:
                 video, truth = lay_over(video, overlay), lay_over(truth, overlay)
-        frames = video if args.no_target else np.concatenate([truth, video], axis=2)
-        name = f"{sample['log_id'][:8]}_{int(sample['moment']):04d}_{args.camera}.mp4"
-        path = write_video(os.path.join(args.out, name), frames)
+        panels = [batch["context"][0].permute(0, 2, 3, 1).cpu().numpy()] if has_context else []
+        panels += ([] if args.no_target else [truth]) + [video]
+        frames = np.concatenate(panels, axis=2)
+        name = f"{sample['log_id'][:8]}_{int(sample['moment']):04d}_{args.camera}"
+        path = write_video(os.path.join(args.out, name + ".mp4"), frames)
+        write_sheet(os.path.join(args.out, name + ".jpg"), frames)
         records.append({"file": os.path.basename(path), "log_id": sample["log_id"], "moment": int(sample["moment"]),
-                        "camera": args.camera, "seed": args.seed + k, "seconds": round(seconds, 2)})
-        print(f"{os.path.basename(path)}: {T} frames, {seconds:.1f} s", flush=True)
+                        "camera": args.camera, "seed": args.seed + k, "seconds": round(seconds, 2), **numbers})
+        shown = "  ".join(f"{key} {value:.3f}" for key, value in numbers.items() if isinstance(value, float))
+        print(f"{os.path.basename(path)}: {T} frames, {seconds:.1f} s  {shown}", flush=True)
+    means = {key: round(float(np.mean([r[key] for r in records if key in r])), 4)
+             for key in ("psnr", "empty_dist", "empty_share") if any(key in r for r in records)}
+    print(f"mean over {len(records)} clips ({args.camera}, {split}): {means}", flush=True)
     with open(os.path.join(args.out, f"samples_{args.camera}.json"), "w") as f:
         json.dump({"checkpoint_step": task.step, "split": split, "steps": steps, "guidance": guidance, "shift": shift,
-                   "frames": int(d["clip_frames"]), "size": list(d["size"]), "clips": records}, f, indent=2)
+                   "frames": int(d["clip_frames"]), "size": list(d["size"]), "loss_empty": task.l["empty"],
+                   "panels": (["front-center photo"] if has_context else [])
+                             + ([] if args.no_target else ["target"]) + ["sample"],
+                   "means": means, "clips": records}, f, indent=2)
     return 0
 
 
