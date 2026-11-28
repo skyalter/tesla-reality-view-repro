@@ -28,7 +28,9 @@ The ego vehicle (``--ego-model``): by default the model in assets/ego_models/tes
 any .glb or .obj file can be given with --ego-model-axes, --ego-model-size and --ego-model-color.
 Optional clean-up before rendering (all off by default): ``--drop-sky``, ``--drop-depth-jump`` and
 ``--drop-oversized`` leave out Gaussians that only look right from the input cameras (sky, the borders between
-an object and its background, oversized blobs); see ``realityview.render.targets.cleanup_mask``.
+an object and its background, oversized blobs); ``--max-height``, ``--max-forward`` and ``--max-side`` keep
+only a fixed region around the vehicle, the same for every frame. See ``cleanup_mask`` and ``region_mask`` in
+``realityview.render.targets``.
 ``--preview`` renders a few moments of the first log from several candidate cameras into one comparison image
 and a table (holes and confidence per camera).
 """
@@ -113,6 +115,13 @@ def parse_args(argv=None):
     p.add_argument("--drop-oversized", type=float, default=None, metavar="FACTOR",
                    help="leave out Gaussians whose longest axis is more than FACTOR times the size of their "
                         "source pixel at their depth (for example 4)")
+    p.add_argument("--max-height", type=float, default=None, metavar="M",
+                   help="leave out Gaussians more than M metres above the road (the ground plane of the ego "
+                        "vehicle at the moment the Gaussian comes from)")
+    p.add_argument("--max-forward", type=float, default=None, metavar="M",
+                   help="leave out Gaussians more than M metres ahead of the rear axle of the ego vehicle at t")
+    p.add_argument("--max-side", type=float, default=None, metavar="M",
+                   help="leave out Gaussians more than M metres to the left or right of the ego vehicle at t")
     p.add_argument("--mode", default="antialiased", choices=("antialiased", "classic"))
     p.add_argument("--workers", type=int, default=2, help="data loader processes")
     p.add_argument("--device", default="cuda")
@@ -181,9 +190,10 @@ def moment_scene(model, task, batch, args) -> dict:
     if args.untrained:
         g = g.replace(opacities=torch.full_like(g.opacities, args.opacity))
     n_obs = count_observations(g, out["depth"][0], batch["K"][0], batch["ref_T_cam"][0], args.tolerance)
-    if args.drop_sky is not None or args.drop_depth_jump is not None or args.drop_oversized is not None:
+    if any(x is not None for x in (args.drop_sky, args.drop_depth_jump, args.drop_oversized, args.max_height)):
         ok = cleanup_mask(g, keep[0], out["depth"][0], batch.get("sky", [None])[0], sky_score=args.drop_sky,
-                          depth_jump=args.drop_depth_jump, max_size=args.drop_oversized)
+                          depth_jump=args.drop_depth_jump, max_size=args.drop_oversized,
+                          max_height=args.max_height, ref_T_ego=batch["ref_T_ego"][0])
         g = g.__class__(**{k: v[ok] for k, v in g.__dict__.items()})
         n_obs = n_obs[ok]
     fc = (batch["slot"][0] == task.t_slot) & (batch["cam_id"][0] == 0)
@@ -225,9 +235,10 @@ def scenes(model, task, ds, log_index, targets, args):
                 del cache[k]
 
 
-def merged(t, context, cache, device):
-    """The Gaussians of the context moments in the reference frame of t (float64 transforms)."""
-    from realityview.render.targets import merge_moments
+def merged(t, context, cache, device, args=None):
+    """The Gaussians of the context moments in the reference frame of t (float64 transforms); with ``args``,
+    only those inside the region --max-forward / --max-side around the ego vehicle at t."""
+    from realityview.render.targets import merge_moments, region_mask
 
     ref_T_city = torch.linalg.inv(cache[t]["city_T_ref"])
     parts = []
@@ -235,7 +246,11 @@ def merged(t, context, cache, device):
         c = cache[j]
         g = c["g"].__class__(**{k: v.to(device) for k, v in c["g"].__dict__.items()})
         parts.append((g, c["n_obs"].to(device), None if j == t else ref_T_city @ c["city_T_ref"], j == t))
-    return merge_moments(parts)
+    g, n_obs, current = merge_moments(parts)
+    if args is not None and (args.max_forward is not None or args.max_side is not None):
+        ok = region_mask(g, cache[t]["ref_T_ego"].to(device), args.max_forward, args.max_side)
+        g, n_obs, current = g.__class__(**{k: v[ok] for k, v in g.__dict__.items()}), n_obs[ok], current[ok]
+    return g, n_obs, current
 
 
 def ego_layers(args, ref_T_ego, ref_T_cam, K, H, W):
@@ -301,7 +316,7 @@ def render_log(model, task, ds, log_index, args, info):
     t0 = time.time()
     for t, context, cache in scenes(model, task, ds, log_index, targets, args):
         start = time.time()
-        g, n_obs, _ = merged(t, context, cache, dev)
+        g, n_obs, _ = merged(t, context, cache, dev, args)
         ref_T_ego = cache[t]["ref_T_ego"].to(dev)
         ref_T_cam, K = chase_camera(ref_T_ego, args.back, args.up, args.pitch, args.hfov, W, H)
         if ego_mask is None:
@@ -318,7 +333,9 @@ def render_log(model, task, ds, log_index, args, info):
                       else os.path.basename(args.ego_model), "context_frames": list(args.context), "stride": args.stride,
                       "tolerance": args.tolerance, "mode": args.mode, "near_m": args.near,
                       "cleanup": {"drop_sky": args.drop_sky, "drop_depth_jump": args.drop_depth_jump,
-                                  "drop_oversized": args.drop_oversized}, "model": info,
+                                  "drop_oversized": args.drop_oversized, "max_height_m": args.max_height,
+                                  "max_forward_m": args.max_forward, "max_side_m": args.max_side},
+                      "model": info,
                       "code_version": code_version()}
             with open(os.path.join(folder, "camera.json"), "w") as f:
                 json.dump(camera, f, indent=2)
@@ -366,7 +383,7 @@ def preview(model, task, ds, args):
     layers = {}
     stats = {r: [] for r in range(len(cams))}
     for t, context, cache in scenes(model, task, ds, 0, picks, args):
-        g, n_obs, _ = merged(t, context, cache, args.device)
+        g, n_obs, _ = merged(t, context, cache, args.device, args)
         ref_T_ego = cache[t]["ref_T_ego"].to(args.device)
         for r, (back, up, pitch, hfov) in enumerate(cams):
             ref_T_cam, K = chase_camera(ref_T_ego, back, up, pitch, hfov, W, H)

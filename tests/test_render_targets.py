@@ -10,8 +10,8 @@ from _models_common import need_cuda
 
 from realityview.render.camera import chase_camera, rotmat_to_quat
 from realityview.render.gaussians import FLAG_MOVER, Gaussians, unproject
-from realityview.render.targets import (cleanup_mask, count_observations, depth_jumps, ego_box_mask, merge_moments,
-                                        transform_gaussians)
+from realityview.render.targets import (ROAD_Z, cleanup_mask, count_observations, depth_jumps, ego_box_mask,
+                                        merge_moments, region_mask, transform_gaussians)
 
 H, W = 48, 64
 F = 50.0
@@ -208,6 +208,39 @@ class Cleanup(unittest.TestCase):
             cleanup_mask(full, keep, depth, depth_jump=0.2)
         with self.assertRaises(ValueError):
             cleanup_mask(g, keep, depth, sky_score=0.5)
+
+
+class Region(unittest.TestCase):
+    def points(self, xyz) -> Gaussians:
+        g = random_gaussians(len(xyz))
+        return g.replace(means=torch.tensor(xyz, dtype=torch.float32))
+
+    def ego_pose(self) -> torch.Tensor:
+        """An ego frame turned by 90 degrees about z and moved: ego x is reference y."""
+        return pose(rot("z", 90.0), [100.0, -50.0, 7.0]).float()
+
+    def to_ref(self, g: Gaussians, ref_T_ego: torch.Tensor) -> Gaussians:
+        return transform_gaussians(g, ref_T_ego)
+
+    def test_height_is_measured_from_the_road_under_the_ego_vehicle(self):
+        T = self.ego_pose()
+        z = [ROAD_Z + h for h in (0.0, 2.9, 3.1, 8.0)]
+        g = self.to_ref(self.points([[5.0, 1.0, v] for v in z]), T)
+        keep = torch.ones(1, 1, 4, dtype=torch.bool)
+        depth = torch.ones(1, 1, 4)
+        ok = cleanup_mask(g, keep, depth, max_height=3.0, ref_T_ego=T)
+        self.assertEqual(ok.tolist(), [True, True, False, False])
+        with self.assertRaises(ValueError):
+            cleanup_mask(g, keep, depth, max_height=3.0)
+
+    def test_forward_and_side_limits_in_the_ego_frame(self):
+        T = self.ego_pose()
+        g = self.to_ref(self.points([[59.0, 0.0, 0.0], [61.0, 0.0, 0.0], [-80.0, 19.0, 0.0], [10.0, -19.0, 5.0],
+                                     [10.0, 21.0, 0.0], [10.0, -21.0, 0.0]]), T)
+        self.assertTrue(bool(region_mask(g, T).all()))
+        self.assertEqual(region_mask(g, T, max_forward=60.0).tolist(), [True, False, True, True, True, True])
+        self.assertEqual(region_mask(g, T, max_side=20.0).tolist(), [True, True, True, True, False, False])
+        self.assertEqual(region_mask(g, T, 60.0, 20.0).tolist(), [True, False, True, True, False, False])
 
 
 class EgoMask(unittest.TestCase):

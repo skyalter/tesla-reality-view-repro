@@ -28,6 +28,8 @@ from .gaussians import FLAG_MOVER, Gaussians
 # ego body box in the ego frame (x forward, y left, z up, origin at the rear-axle centre), metres; a rough
 # outline of the Argoverse 2 vehicle (Ford Fusion: about 4.9 x 1.9 x 1.5 m, rear axle about 1.1 m from the back)
 EGO_BOX = ((-1.3, 4.0), (-1.1, 1.1), (-0.4, 1.6))
+# height of the road in the ego frame: the ego origin (rear-axle centre) is about 0.33 m above the ground
+ROAD_Z = -0.33
 
 
 @torch.no_grad()
@@ -89,7 +91,8 @@ def depth_jumps(depth: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def cleanup_mask(g: Gaussians, keep: torch.Tensor, depth: torch.Tensor, sky: torch.Tensor | None = None, *,
                  sky_score: float | None = None, depth_jump: float | None = None,
-                 max_size: float | None = None) -> torch.Tensor:
+                 max_size: float | None = None, max_height: float | None = None,
+                 ref_T_ego: torch.Tensor | None = None) -> torch.Tensor:
     """Which Gaussians of one sample to keep when the chase view is rendered: (G,) bool.
 
     The Gaussians are trained and checked from the input cameras only; from a camera 9 m up three kinds of them
@@ -101,6 +104,11 @@ def cleanup_mask(g: Gaussians, keep: torch.Tensor, depth: torch.Tensor, sky: tor
                      (relative, ``depth_jumps``) to a neighbour: they hang between an object and its background
         max_size     Gaussians whose longest axis is more than ``max_size`` times the size of their source pixel
                      at their depth (``footprint``): seen from close by they are large blurred blobs
+        max_height   Gaussians more than ``max_height`` metres above the road, the road being the plane
+                     z = ``ROAD_Z`` of the ego frame of this sample (``ref_T_ego`` (4, 4), ego -> reference):
+                     what is above the input cameras was only seen from below. Each moment uses its own plane,
+                     so the limit follows the road along the driven path; away from the path a slope shifts it
+                     (measured on one hilly log: about 0.2 m at 20-40 m, 0.6 m at 60-100 m, median)
 
     ``keep`` (N, H, W) bool are the pixels the Gaussians were made from, in the order of ``g``
     (``Stage1HeadTask.gaussian_masks``); ``depth`` (N, H, W) is the predicted depth of the input views.
@@ -116,6 +124,29 @@ def cleanup_mask(g: Gaussians, keep: torch.Tensor, depth: torch.Tensor, sky: tor
         ok &= depth_jumps(depth.float())[keep] <= depth_jump
     if max_size is not None:
         ok &= g.scales.max(dim=-1).values <= max_size * g.footprint
+    if max_height is not None:
+        if ref_T_ego is None:
+            raise ValueError("max_height needs ref_T_ego")
+        ego_T_ref = torch.linalg.inv(ref_T_ego.float()).to(g.means.device)
+        ok &= g.means.float() @ ego_T_ref[2, :3] + ego_T_ref[2, 3] - ROAD_Z <= max_height
+    return ok
+
+
+@torch.no_grad()
+def region_mask(g: Gaussians, ref_T_ego: torch.Tensor, max_forward: float | None = None,
+                max_side: float | None = None) -> torch.Tensor:
+    """Which Gaussians lie inside a fixed region of the ego frame (x forward, y left): (G,) bool.
+
+    Kept: x <= ``max_forward`` and |y| <= ``max_side`` (metres from the rear-axle centre; None = no limit).
+    ``g`` is in the reference frame, ``ref_T_ego`` (4, 4) maps ego -> reference. The same box for every frame
+    gives every chase image the same extent."""
+    ego_T_ref = torch.linalg.inv(ref_T_ego.float()).to(g.means.device)
+    xy = g.means.float() @ ego_T_ref[:2, :3].T + ego_T_ref[:2, 3]
+    ok = torch.ones(len(g), dtype=torch.bool, device=g.means.device)
+    if max_forward is not None:
+        ok &= xy[:, 0] <= max_forward
+    if max_side is not None:
+        ok &= xy[:, 1].abs() <= max_side
     return ok
 
 
